@@ -237,6 +237,12 @@ def spawn_worker(
     environment = dict(os.environ)
     already = environment.get("PYTHONPATH", "")
     environment["PYTHONPATH"] = os.pathsep.join(part for part in (source, already) if part)
+    # Never import from the folder the server was started in. Python puts that folder first on a
+    # ``-m`` child's path, ahead of the engine, and a person often starts the Dashboard inside a
+    # project that sits in a shared data folder: a folder named ``ingence`` or a ``yaml.py`` there
+    # would run as them. ``-P`` below keeps it off this worker's path, and the variable keeps it off
+    # the path of every process the worker starts (the read workers' ``-c`` children included).
+    environment["PYTHONSAFEPATH"] = "1"
     # The project's own logs folder, nothing on the way a link, and never a link at the log itself.
     logs = owned_path(project, JOBS_DIR, "logs")
     logs.mkdir(parents=True, exist_ok=True)
@@ -259,6 +265,7 @@ def spawn_worker(
         process = subprocess.Popen(  # noqa: S603 - our own interpreter and module
             [
                 sys.executable,
+                "-P",
                 "-m",
                 WORKER_MODULE,
                 "--project",

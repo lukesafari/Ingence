@@ -21,6 +21,7 @@ command line's own option prints. Every other command line imports the command l
 
 from __future__ import annotations
 
+import os
 import sys
 
 __all__ = ["main"]
@@ -31,6 +32,12 @@ _VERSION_ONLY = ["--version"]
 
 def main() -> None:
     """Run the command line, imported here rather than at module scope."""
+    # Every Python process the command starts (the read workers, the Dashboard's job workers, the
+    # resource tracker) imports only from the engine and its environment, never from the folder the
+    # command was started in. Without this, a ``-c`` or ``-m`` child puts that folder first on its
+    # path, and a folder named ``ingence`` or a ``multiprocessing.py`` in a shared data folder would
+    # run as the person. Set before anything starts a child, and inherited by every child.
+    os.environ["PYTHONSAFEPATH"] = "1"
     if sys.argv[1:] == _VERSION_ONLY:
         from pathlib import Path
 

@@ -255,7 +255,14 @@ def test_a_stopped_job_s_worker_is_stopped_with_everything_it_started(
     real_popen = subprocess.Popen
 
     def popen(args: Any, *rest: Any, **options: Any) -> Any:
-        if isinstance(args, list) and args[1:3] == ["-m", supervisor_module.WORKER_MODULE]:
+        # The worker's own command, ``python -P -m ingence.jobs.worker ...`` (``-P``: nothing is
+        # imported from the folder the server runs in).
+        if (
+            isinstance(args, list)
+            and "-m" in args
+            and args[args.index("-m") + 1 : args.index("-m") + 2]
+            == [supervisor_module.WORKER_MODULE]
+        ):
             args = [sys.executable, "-c", textwrap.dedent(_WORKER), str(marker)]
         return real_popen(args, *rest, **options)
 

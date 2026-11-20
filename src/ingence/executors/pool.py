@@ -504,6 +504,12 @@ class ReadPool:
         self.close()
 
     def _spawn(self) -> _Worker:
+        # A spawned worker starts as ``python -c``, which puts the folder the process runs in first
+        # on its path before it imports anything: a ``multiprocessing.py`` or a folder named
+        # ``ingence`` there would run in place of the engine. The variable keeps that folder off
+        # the path of every child, and is set however the engine was started (the command line
+        # sets it too, ``cli/launch.py``).
+        os.environ.setdefault("PYTHONSAFEPATH", "1")
         spawn = multiprocessing.get_context("spawn")
         parent_end, child_end = spawn.Pipe(duplex=True)
         process = spawn.Process(
