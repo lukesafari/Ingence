@@ -830,10 +830,18 @@ def build_brief(
 
 
 def write_brief(brief: Brief, directory: Path) -> tuple[Path, Path, Path]:
-    """Write ``brief.md``, ``brief.json`` and ``brief.aliases.json`` into a folder."""
+    """Write ``brief.md``, ``brief.json`` and ``brief.aliases.json`` into a folder.
+
+    Each file is written beside itself and moved into place (``core.destinations.write_replacing``),
+    never opened at its name: a link standing at one of the three names, in a folder a person
+    chose or under the project's exports, is replaced by the file and never written through into
+    whatever it leads to, a file in a data folder included.
+    """
+    from ingence.core.destinations import write_replacing
+
     directory.mkdir(parents=True, exist_ok=True)
     markdown, data, key = (directory / name for name in BRIEF_FILES)
-    markdown.write_text(brief.markdown, encoding="utf-8")
-    data.write_text(brief.json_text, encoding="utf-8")
+    write_replacing(markdown, brief.markdown)
+    write_replacing(data, brief.json_text)
     brief.aliases.write(key)
     return markdown, data, key

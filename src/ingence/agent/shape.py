@@ -892,8 +892,11 @@ class Aliases:
         }
 
     def write(self, path: Path) -> None:
-        """Write the key as JSON."""
-        path.write_text(json.dumps(self.as_mapping(), indent=2, sort_keys=True) + "\n")
+        """Write the key as JSON, replacing ``path`` whole and never writing through a link there
+        (``core.destinations.write_replacing``)."""
+        from ingence.core.destinations import write_replacing
+
+        write_replacing(path, json.dumps(self.as_mapping(), indent=2, sort_keys=True) + "\n")
 
 
 # ---------------------------------------------------------------------------
