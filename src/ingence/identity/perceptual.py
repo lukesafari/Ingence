@@ -145,6 +145,12 @@ class TextMinHash:
         )
 
 
+#: The image formats the picture fingerprint decodes, and the only ones Pillow is let try. None of
+#: them runs anything: the formats Pillow hands to another program (EPS and PostScript, to
+#: Ghostscript) are never among them.
+DECODED_FORMATS = ("PNG", "JPEG", "GIF", "BMP", "TIFF")
+
+
 class ImagePerceptualHash:
     """A difference hash over a downscaled greyscale image.
 
@@ -191,7 +197,15 @@ class ImagePerceptualHash:
             # and Pillow hands it the stream's descriptor, so libtiff maps the file itself,
             # in C. A stream whose descriptor cannot be asked for makes Pillow hand libtiff the
             # bytes instead: the same value, nothing mapped.
-            with context.open() as opened, self._image.open(_without_descriptor(opened)) as image:
+            #
+            # Only the raster formats this method is for are tried (:data:`DECODED_FORMATS`).
+            # Pillow otherwise picks a decoder from the bytes, whatever the name says, and its
+            # EPS decoder hands the file to Ghostscript to run: a ``figure.png`` holding
+            # PostScript would be run as a program. Ingence never runs what it finds.
+            with (
+                context.open() as opened,
+                self._image.open(_without_descriptor(opened), formats=DECODED_FORMATS) as image,
+            ):
                 # Decompression-bomb protection is Pillow's own, and it raises
                 # rather than allocating, which is the behaviour wanted here.
                 value = self._imagehash.dhash(image, hash_size=16)
