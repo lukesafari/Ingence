@@ -46,8 +46,34 @@ A test fails when one of these is stale. Each takes `--check`.
 - `tools/write_pack_digests.py` writes a pack's digest. Run it after you change a pack's words, and
   raise the pack's `version` by hand.
 
-No test checks the Graph workspace's built files under `src/ingence/web/explorer/`. After you
-change `explorer/`, run `npm ci` and `npm run build` there and commit what changes.
+After you change `explorer/`, run `npm ci` and `npm run build` there and commit what changes under
+`src/ingence/web/explorer/`. The pull request checks rebuild it and fail where the committed files
+differ.
+
+## The oldest dependencies
+
+`pyproject.toml` gives each dependency a lower bound, and an install at exactly those versions must
+work. `tools/minimum-constraints.txt` pins every bound, and `tests/test_minimum_dependencies.py`
+fails where the two disagree. To try the oldest install, use Python 3.12 in a fresh environment:
+
+```
+python -m venv .venv-min
+.venv-min/bin/python -m pip install -c tools/minimum-constraints.txt -e ".[content]"
+.venv-min/bin/python -m pip install pytest hypothesis
+.venv-min/bin/python tools/smoke_installed.py --command .venv-min/bin/ingence
+.venv-min/bin/python -m pytest --ignore-glob="tests/test_browser*"
+```
+
+Raise a bound only to a version you have run this way, and change both files in the same commit.
+
+## What runs on a pull request
+
+`.github/workflows/checks.yml` runs the checks above on every pull request: lint and types, the
+generated files, the whole test suite with the browser tests required (a missing browser fails them,
+it never skips them), the Dashboard's type check and JavaScript tests, the Graph workspace rebuilt
+and compared, the oldest dependencies, and the built wheel installed in an empty environment and run
+(`tools/smoke_installed.py`). A version tag, or a run started by hand from the Actions tab, also runs
+the tests on Linux, macOS and Windows with the oldest and newest Python the package supports.
 
 ## Propose a change
 
