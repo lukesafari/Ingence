@@ -14,9 +14,22 @@ A sequence is claimed under an exclusive lock, because two appenders are real. T
 Review view writes while a command-line session may also be running, both on one machine. Reading
 the last sequence and then writing it is not atomic on its own. Two appenders that both read 7 would
 both write 7. That gives two decisions under one identifier, in a table whose primary key is the
-event identifier. The lock is a file created with ``O_CREAT | O_EXCL``, which is atomic on all three
-platforms. :func:`exclusive_creation_refuses` measures that and does not assume it. A platform
-property is measured and never assumed.
+event identifier.
+
+Two locks are held for a claim. The first is one the operating system holds for the appender
+and lets go of when the appender exits, however it exits (``jobs.locks.FileLock``, on
+:data:`WRITER_LOCK`): two appenders of this engine wait for each other there and never meet below.
+The second is the file earlier engines locked with, created with ``O_CREAT | O_EXCL``
+(:data:`LOCK_FILE`), which is atomic on all three platforms. It is still taken, so an older engine
+writing to the same project waits for this one, and it is the backstop where the operating system's
+lock does not exclude (a network share mounted with locks kept on each client). This engine writes
+its computer, its process and a random token into that file. A file found there that names this
+computer and a process that no longer exists was left by an appender that died, and is removed at
+once, so nobody repairs anything by hand after a crash. Any other file found there (an older
+engine's, which is empty, or one naming a live process or another computer) is waited on, and named
+in the error if it outlasts the wait, as before. :func:`exclusive_creation_refuses` measures that
+exclusive creation is atomic on the filesystem in use and does not assume it. A platform property
+is measured and never assumed.
 
 A fragment is complete before it is visible. The bytes are written into the project's staging
 directory, flushed, and only then moved into ``record/``. An interruption therefore leaves either
@@ -38,6 +51,7 @@ caller could ask for a tier. Both ceilings hold by construction.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import errno
 import json
@@ -51,7 +65,7 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ingence.core.destinations import create_exclusive
+from ingence.core.destinations import create_exclusive, give_new_name
 from ingence.core.ids import PROJECT_SCOPE, canonical_json, digest_text, record_event_id
 from ingence.core.schema import MovedBy, RecordEvent, RecordEventKind
 from ingence.core.versions import refuse_newer
@@ -69,6 +83,7 @@ __all__ = [
     "HELD_PROJECTS",
     "LOCK_FILE",
     "WITHDRAWABLE_PREFIXES",
+    "WRITER_LOCK",
     "AppendError",
     "RecordLockedError",
     "WithdrawRefusedError",
@@ -93,14 +108,23 @@ __all__ = [
     "withdrawn_ids",
 ]
 
-#: Held for the whole of a claim: read the sequences present, write the fragment, move it
-#: in. Named with a leading dot so it never looks like a fragment, and it is the only file
-#: in ``record/`` that is not one.
+#: The operating system's lock, held for the whole of a claim: read the sequences present, write
+#: the fragment, move it in. The file stays, as ``jobs/worker.lock`` does; the lock is on it, and
+#: the system lets go of the lock when its holder exits. Named with a leading dot so it never looks
+#: like a fragment.
+WRITER_LOCK = ".writer.lock"
+
+#: The lock earlier engines took, and the backstop for this one: a file created exclusively and
+#: removed when done. An older engine on the same project waits for it.
 LOCK_FILE = ".append.lock"
 
+#: How this engine's :data:`LOCK_FILE` begins, before the holder's computer, process and token.
+#: An older engine's is empty.
+_LOCK_MARK = b"ingence-writer "
+
 #: How long an appender waits for another to finish before giving up. An append writes one
-#: small fragment, so a wait longer than this means a holder died rather than a holder is
-#: slow, and saying so is more useful than waiting.
+#: small fragment, so a wait longer than this means a holder died or is stuck, and saying so is
+#: more useful than waiting.
 LOCK_TIMEOUT_SECONDS = 10.0
 
 #: How often the wait re-tries the claim. Short enough that two sequential appends in a
@@ -204,19 +228,71 @@ def exclusive_creation_refuses(directory: Path) -> bool:
 _DELETE_PENDING_REFUSES = os.name == "nt"
 
 
+@contextmanager
+def _held(directory: Path, *, timeout: float) -> Iterator[None]:
+    """Hold the Record's locks for a claim: the operating system's (:data:`WRITER_LOCK`), then the
+    file created exclusively (:data:`LOCK_FILE`). Both are let go of when the block ends.
+
+    Neither is reached through a link: a link standing at either name would take the lock file
+    into whatever it leads to, a folder of source data included.
+    """
+    from ingence.jobs.locks import FileLock
+
+    for name in (WRITER_LOCK, LOCK_FILE):
+        if (directory / name).is_symlink() or os.path.isjunction(directory / name):
+            message = (
+                f"{directory / name} is a link. Ingence writes nothing through a link, so the "
+                "Record was not changed: remove the link."
+            )
+            raise AppendError(message)
+    lock = FileLock(directory / WRITER_LOCK)
+    try:
+        taken = lock.acquire(timeout=timeout, poll=LOCK_POLL_SECONDS)
+    except OSError as exc:
+        message = f"the Record at {directory} cannot be written: {exc.strerror or exc}"
+        raise AppendError(message) from exc
+    if not taken:
+        message = (
+            f"the Record's lock at {lock.path} was held for more than {timeout:g} s by another "
+            "program adding to it. The lock is let go of when that program finishes or exits, so "
+            "try again in a moment."
+        )
+        raise RecordLockedError(message)
+    try:
+        descriptor = _claim_lock(directory, timeout=timeout)
+        try:
+            yield
+        finally:
+            _release_lock(directory, descriptor)
+    finally:
+        lock.release()
+
+
 def _claim_lock(directory: Path, *, timeout: float) -> int:
-    """Create the lock file, waiting for whoever holds it. Returns its descriptor."""
+    """Create the lock file, waiting for whoever holds it, and mark it as this holder's. Returns
+    its descriptor.
+
+    A file standing there that this engine marked, naming this computer and a process that no
+    longer exists, was left by a holder that died, and is removed at once (:func:`_holder_gone`).
+    Any other is waited on, and named if it outlasts ``timeout``.
+    """
     path = directory / LOCK_FILE
     deadline = time.monotonic() + timeout
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
     while True:
         try:
-            return os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            descriptor = os.open(path, flags, 0o600)
         except PermissionError as exc:
             if not _DELETE_PENDING_REFUSES or time.monotonic() >= deadline:
                 message = f"the Record at {directory} cannot be written: {exc.strerror}"
                 raise AppendError(message) from exc
             time.sleep(LOCK_POLL_SECONDS)
+            continue
         except FileExistsError:
+            if _holder_gone(path):
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+                continue
             if time.monotonic() >= deadline:
                 message = (
                     f"the Record's lock at {path} was held for more than {timeout:g} s. "
@@ -225,16 +301,97 @@ def _claim_lock(directory: Path, *, timeout: float) -> int:
                 )
                 raise RecordLockedError(message) from None
             time.sleep(LOCK_POLL_SECONDS)
+            continue
         except OSError as exc:  # pragma: no cover - a read-only or full project directory
-            if exc.errno in {errno.EROFS, errno.EACCES, errno.ENOSPC}:
+            if exc.errno in {errno.EROFS, errno.EACCES, errno.ENOSPC, errno.ELOOP}:
                 message = f"the Record at {directory} cannot be written: {exc.strerror}"
                 raise AppendError(message) from exc
             raise
+        try:
+            os.write(descriptor, _LOCK_MARK + _holder().encode("utf-8") + b"\n")
+        except BaseException:
+            os.close(descriptor)
+            path.unlink(missing_ok=True)
+            raise
+        return descriptor
+
+
+def _holder() -> str:
+    """Who this holder is, as its lock file says: its computer, its process and a token."""
+    import secrets
+    import socket
+
+    return json.dumps(
+        {"host": socket.gethostname(), "pid": os.getpid(), "token": secrets.token_hex(8)},
+        sort_keys=True,
+    )
+
+
+def _holder_gone(path: Path) -> bool:
+    """Whether the lock file at ``path`` was left by a holder that is gone: one this engine marked,
+    naming this computer and a process that no longer exists.
+
+    An older engine's file is empty, and is never opened here (on Windows an open file cannot be
+    removed, and its holder removes it as it finishes). A file naming another computer, or a
+    process that is still running (or whose state cannot be learned), is not gone.
+    """
+    import socket
+
+    try:
+        if os.lstat(path).st_size <= len(_LOCK_MARK):
+            return False
+        with path.open("rb") as handle:
+            said = handle.read(4096)
+    except OSError:
+        return False
+    if not said.startswith(_LOCK_MARK):
+        return False
+    try:
+        holder = json.loads(said[len(_LOCK_MARK) :].decode("utf-8"))
+        host, pid = str(holder["host"]), int(holder["pid"])
+    except (ValueError, KeyError, TypeError):
+        return False
+    if host != socket.gethostname() or pid == os.getpid():
+        return False
+    return not _running(pid)
+
+
+def _running(pid: int) -> bool:
+    """Whether a process with this identifier is running on this computer. Where that cannot be
+    learned it is taken to be running, so a live holder's lock is never removed."""
+    if os.name == "nt":  # pragma: no cover - Windows only
+        import ctypes
+
+        kernel = ctypes.windll.kernel32  # type: ignore[attr-defined,unused-ignore]
+        handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return bool(kernel.GetLastError() != 87)  # ERROR_INVALID_PARAMETER: no such process
+        try:
+            code = ctypes.c_ulong()
+            if not kernel.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return bool(code.value == 259)  # STILL_ACTIVE
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
 
 def _release_lock(directory: Path, descriptor: int) -> None:
     os.close(descriptor)
-    (directory / LOCK_FILE).unlink(missing_ok=True)
+    path = directory / LOCK_FILE
+    for _ in range(50):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:  # pragma: no cover - Windows, while another appender reads it
+            time.sleep(LOCK_POLL_SECONDS)
+    path.unlink(missing_ok=True)  # pragma: no cover - said in the error it raises
 
 
 def _checked_instant(occurred_at: str) -> str:
@@ -316,8 +473,7 @@ def append_event(
     staging = owned_path(project, STAGING_DIR)
     staging.mkdir(parents=True, exist_ok=True)
 
-    descriptor = _claim_lock(directory, timeout=timeout)
-    try:
+    with _held(directory, timeout=timeout):
         if kind is RecordEventKind.WITHDRAW and payload and "answer" in payload:
             # Checked with the lock held. Two clicks on one button reach this one after the other,
             # and the second finds the first's withdrawal already written.
@@ -351,14 +507,15 @@ def append_event(
             incoming.unlink(missing_ok=True)
             raise
         destination = directory / fragment_name(sequence)
-        if destination.exists():  # pragma: no cover - the lock is what prevents this
+        # Given its name only where no fragment has it, never over one: the locks are what make
+        # this the next sequence, and this is what keeps a decision from ever being replaced.
+        try:
+            give_new_name(incoming, destination)
+        except FileExistsError:  # pragma: no cover - the locks are what prevent this
             incoming.unlink(missing_ok=True)
             message = f"sequence {sequence} is already in the Record at {destination}"
-            raise AppendError(message)
-        os.replace(incoming, destination)
+            raise AppendError(message) from None
         fsync_directory(directory)
-    finally:
-        _release_lock(directory, descriptor)
     return event
 
 

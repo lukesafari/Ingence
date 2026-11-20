@@ -41,6 +41,7 @@ from ingence.core.project import Project
 from ingence.core.schema import RecordEventKind
 from ingence.dictionary.store import DictionaryStore
 from ingence.infer.run import run_inference
+from ingence.jobs.locks import held_elsewhere
 from ingence.record import log as record_log
 from ingence.record.imported import apply_carried, carried_words, stated
 from ingence.record.log import (
@@ -387,7 +388,7 @@ def test_the_writer_checks_a_withdrawal_with_the_records_lock_held(
     real = record_log._check_answer_withdrawal
 
     def watching(where: Path, detail: Any) -> None:
-        seen.append((record_log.record_directory(where) / record_log.LOCK_FILE).exists())
+        seen.append(held_elsewhere(record_log.record_directory(where) / record_log.WRITER_LOCK))
         real(where, detail)
 
     monkeypatch.setattr(record_log, "_check_answer_withdrawal", watching)

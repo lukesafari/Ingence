@@ -132,7 +132,11 @@ class FileLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout
         while True:
-            descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+            # Never through a link standing at the lock's name, which would make the lock file
+            # wherever the link leads.
+            descriptor = os.open(
+                self.path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o644
+            )
             if _try(descriptor):
                 self._descriptor = descriptor
                 if holder is not None:

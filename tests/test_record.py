@@ -30,9 +30,11 @@ import pytest
 from ingence.core.ids import PROJECT_SCOPE, Scope, ScopeKind
 from ingence.core.project import Project
 from ingence.core.schema import RecordEvent, RecordEventKind
+from ingence.jobs.locks import FileLock, held_elsewhere
 from ingence.record import log
 from ingence.record.log import (
     LOCK_FILE,
+    WRITER_LOCK,
     AppendError,
     RecordLockedError,
     append_event,
@@ -298,22 +300,23 @@ def test_concurrent_appends_each_take_their_own_sequence(project: Project) -> No
     assert len({event.event_id for event in read_events(project.path)}) == count
 
 
-def test_a_lock_nobody_releases_is_named_rather_than_waited_on(project: Project) -> None:
-    """A holder that never finishes is a holder that died, and saying so is the useful act.
+def test_a_lock_a_live_holder_keeps_is_named_rather_than_waited_on(project: Project) -> None:
+    """A holder that never finishes is stuck, and saying so is the useful act.
 
-    An append writes one small fragment, so a long wait is not a slow writer. The message
-    names the file, because releasing it is the person's one available move.
+    The message names the lock, and says it is let go of when the holder finishes or exits.
     """
     directory = record_directory(project.path)
     directory.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(directory / LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    holder = FileLock(directory / WRITER_LOCK)
+    assert holder.acquire()
     try:
-        with pytest.raises(RecordLockedError, match="was held for more than"):
+        with pytest.raises(RecordLockedError, match="was held for more than") as refused:
             confirm(project, "entry_abc", timeout=0.1)
+        assert "finishes or exits" in str(refused.value)
     finally:
-        os.close(descriptor)
-        (directory / LOCK_FILE).unlink(missing_ok=True)
+        holder.release()
     assert read_events(project.path) == ()
+    assert confirm(project, "entry_abc").sequence == 1
 
 
 def test_the_lock_is_released_even_when_an_append_fails(project: Project, monkeypatch) -> None:
@@ -321,9 +324,153 @@ def test_the_lock_is_released_even_when_an_append_fails(project: Project, monkey
     monkeypatch.setattr(log, "write_fragment", _explode)
     with pytest.raises(RuntimeError, match="disk went away"):
         confirm(project, "entry_abc")
-    assert not (record_directory(project.path) / LOCK_FILE).exists()
+    directory = record_directory(project.path)
+    assert not (directory / LOCK_FILE).exists()
+    assert not held_elsewhere(directory / WRITER_LOCK)
     monkeypatch.undo()
     assert confirm(project, "entry_abc").sequence == 1
+
+
+_HOLD_AND_DIE = """
+import os, sys, time
+from pathlib import Path
+from ingence.record import log
+
+directory = Path(sys.argv[1])
+with log._held(directory, timeout=5):
+    print("held", flush=True)
+    time.sleep(60)
+"""
+
+
+def test_an_appender_killed_holding_the_lock_never_blocks_the_next(project: Project) -> None:
+    """The lock is the operating system's, so a holder that dies lets go of it as it dies. The
+    file older engines wait on, which it marked and left, is removed by the next holder at once."""
+    import subprocess
+    import sys
+    import time
+
+    directory = record_directory(project.path)
+    directory.mkdir(parents=True, exist_ok=True)
+    child = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_AND_DIE, str(directory)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "held"
+        assert (directory / LOCK_FILE).exists()
+        assert held_elsewhere(directory / WRITER_LOCK)
+    finally:
+        child.kill()
+        child.wait(timeout=30)
+        if child.stdout is not None:
+            child.stdout.close()
+    # Left behind, as a killed holder leaves it.
+    assert (directory / LOCK_FILE).exists()
+    started = time.monotonic()
+    assert confirm(project, "entry_abc", timeout=5).sequence == 1
+    assert time.monotonic() - started < 2.0
+    assert not (directory / LOCK_FILE).exists()
+
+
+def test_an_older_engines_lock_is_waited_on_while_it_holds_it(project: Project) -> None:
+    """An older engine's lock (a file created exclusively, unmarked) is a holder at work while it
+    changes: the append waits for it and goes on when it is let go of."""
+    import time
+
+    directory = record_directory(project.path)
+    directory.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(directory / LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
+
+    def let_go() -> None:
+        time.sleep(0.3)
+        (directory / LOCK_FILE).unlink()
+
+    releaser = threading.Thread(target=let_go)
+    releaser.start()
+    started = time.monotonic()
+    try:
+        assert confirm(project, "entry_abc", timeout=5).sequence == 1
+    finally:
+        releaser.join()
+    waited = time.monotonic() - started
+    assert 0.25 <= waited < 4.0
+
+
+def test_an_older_engines_lock_that_outlasts_the_wait_is_named_and_kept(project: Project) -> None:
+    """An older engine's lock says nothing of its holder, so how long it has stood proves nothing:
+    a slow holder on a slow share is alive. It is named, as before, and never removed."""
+    directory = record_directory(project.path)
+    directory.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(directory / LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(descriptor)
+    with pytest.raises(RecordLockedError, match="remove the file"):
+        confirm(project, "entry_abc", timeout=0.2)
+    assert (directory / LOCK_FILE).exists()
+    assert read_events(project.path) == ()
+
+
+def _marked(directory: Path, *, host: str, pid: int) -> None:
+    import json
+
+    (directory / LOCK_FILE).write_bytes(
+        log._LOCK_MARK + json.dumps({"host": host, "pid": pid, "token": "0" * 16}).encode() + b"\n"
+    )
+
+
+def test_a_lock_naming_another_computer_is_never_taken_for_a_dead_holders(
+    project: Project,
+) -> None:
+    """On a shared drive, a holder on another computer cannot be looked at from this one."""
+    directory = record_directory(project.path)
+    directory.mkdir(parents=True, exist_ok=True)
+    _marked(directory, host="another-computer.invalid", pid=999_999)
+    with pytest.raises(RecordLockedError):
+        confirm(project, "entry_abc", timeout=0.2)
+    assert (directory / LOCK_FILE).exists()
+
+
+def test_a_lock_naming_a_live_process_here_is_waited_on(project: Project) -> None:
+    import socket
+
+    directory = record_directory(project.path)
+    directory.mkdir(parents=True, exist_ok=True)
+    # The test's parent is alive for the whole test.
+    _marked(directory, host=socket.gethostname(), pid=os.getppid())
+    with pytest.raises(RecordLockedError):
+        confirm(project, "entry_abc", timeout=0.2)
+    assert (directory / LOCK_FILE).exists()
+
+
+@pytest.mark.parametrize("name", [WRITER_LOCK, LOCK_FILE])
+def test_a_link_at_either_lock_is_refused_and_nothing_is_made_where_it_leads(
+    project: Project, tmp_path: Path, name: str
+) -> None:
+    directory = record_directory(project.path)
+    directory.mkdir(parents=True, exist_ok=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    try:
+        (directory / name).symlink_to(elsewhere / "planted.lock")
+    except (OSError, NotImplementedError):
+        pytest.skip("this system does not let a test make a symbolic link")
+    with pytest.raises(log.AppendError, match="link"):
+        confirm(project, "entry_abc")
+    assert list(elsewhere.iterdir()) == []
+    assert read_events(project.path) == ()
+
+
+def test_an_older_engine_waits_while_this_one_holds_the_record(project: Project) -> None:
+    """While this engine holds the Record, the file an older engine creates exclusively is there,
+    so the older engine's own claim waits."""
+    directory = record_directory(project.path)
+    directory.mkdir(parents=True, exist_ok=True)
+    with log._held(directory, timeout=1), pytest.raises(FileExistsError):
+        os.open(directory / LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    assert not (directory / LOCK_FILE).exists()
 
 
 def _explode(*args: object, **kwargs: object) -> None:
