@@ -12,11 +12,15 @@
  *   show, so a timer that fires after the Settings table has gone still sends the edit, and a
  *   save with nothing to send is never made. Every held edit is saved at once when the view
  *   changes and when the page closes. A value put back as it was is sent as `removed`, the only
- *   way anything leaves a draft. The server adds every other save to the draft.
+ *   way anything leaves a draft. The server adds every other save to the draft. Saves of one kind
+ *   go one at a time (`savingDrafts`), and each names this page and carries a rising number, so a
+ *   save that lands after a newer one (the request a closing page sends) changes nothing. An edit
+ *   stays held until a save carrying it lands, and a save that fails is sent again with the next.
  * - Commit opens a small dialog: a message (today's date by default), what the commit will need
  *   run, and Commit. The server lays the values into settings.dashboard.yaml and appends a
  *   checkpoint, and settings.yaml is never written. Every held edit is saved before the dialog
- *   opens, and its Commit button is disabled while the commit runs.
+ *   opens, and the dialog does not open where one of those saves failed. Its Commit button is
+ *   disabled while the commit runs.
  * - Re-run is always in the header. It is disabled only when nothing waits, and its hover text
  *   says what it will run. Nothing runs by itself, and nothing interrupts. Every change since
  *   the last run (answers, words defined or turned off, packs, committed settings) is one list.
@@ -36,6 +40,16 @@ const pendingDrafts = new Map();
 /* Per kind: each edited value not yet saved, by dotted path, and each path put back as it was. */
 const unsavedEdits = new Map();
 const putBackEdits = new Map();
+/* Per kind: the save on its way, and every save asked for after it, as one chain. Saves of one kind
+ * go one at a time, so the server meets them in the order they were made. */
+const savingDrafts = new Map();
+/* This page's name for itself and the number of its last save. The server keeps each page's last
+ * number and applies no save numbered at or below it, so a save that arrives after a newer one
+ * (the request a closing page sends, beside one still on its way) never puts an old value back. */
+const DRAFT_WRITER = `page-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+let draftSequence = 0;
+/* Per kind: the draft's revision this page last saw, to tell when another page saved meanwhile. */
+const seenRevisions = new Map();
 let uncommittedTotal = 0;
 let workspaceApplying = null;
 
@@ -135,22 +149,54 @@ function draftBody(kind) {
   const {edits, putBack} = heldEdits(kind);
   const values = {};
   for (const [path, value] of edits) setPath(values, draftKeys(kind, path), value);
+  draftSequence += 1;
   // Sent as keys, never as a dotted name the server would split at every dot.
-  return {kind, values, removed: [...putBack].map((path) => draftKeys(kind, path))};
+  return {kind, values, removed: [...putBack].map((path) => draftKeys(kind, path)),
+    writer: DRAFT_WRITER, sequence: draftSequence};
 }
 
-/* Send what is held for one kind. Nothing held, nothing sent: a save never empties a draft. */
-async function saveDrafts(kind) {
+function valueAt(values, keys) {
+  let node = values;
+  for (const key of keys) {
+    if (!node || typeof node !== 'object' || !(key in node)) return undefined;
+    node = node[key];
+  }
+  return node;
+}
+
+/* Save what is held for one kind, after any save of that kind already on its way. Resolves once
+ * this save has landed; rejects where it failed, and what it sent stays held for the next. */
+function saveDrafts(kind) {
   clearTimeout(pendingDrafts.get(kind));
   pendingDrafts.delete(kind);
+  const before = savingDrafts.get(kind) || Promise.resolve();
+  // A failed save before this one does not stop this one: its edits are still held, and go now.
+  const mine = before.catch(() => {}).then(() => sendDrafts(kind));
+  savingDrafts.set(kind, mine);
+  const done = () => { if (savingDrafts.get(kind) === mine) savingDrafts.delete(kind); };
+  mine.then(done, done);
+  return mine;
+}
+
+/* Send what is held for one kind, and give the server's answer. Nothing held, nothing sent (and
+ * no answer): a save never empties a draft. */
+async function sendDrafts(kind) {
   const {edits, putBack} = heldEdits(kind);
-  if (!edits.size && !putBack.size) return;
+  if (!edits.size && !putBack.size) return undefined;
   const sent = new Map(edits);
   const sentBack = new Set(putBack);
   const saved = await write('/api/workspace/draft', draftBody(kind));
-  // What was sent is saved; an edit typed while it was on its way stays held for the next save.
+  // What was sent is saved; an edit typed while it was on its way stays held for the next save. A
+  // stale answer (a newer save from this page landed first) changes nothing on the server, and the
+  // newer save held all this one did, so the same is true of it.
   for (const [path, value] of sent) if (Object.is(edits.get(path), value)) edits.delete(path);
   for (const path of sentBack) if (!edits.has(path)) putBack.delete(path);
+  // Another page or program saved this kind since this page last did: a field this page shows as
+  // saved whose draft now says otherwise is marked, rather than left showing a value that is not
+  // the one a commit would apply.
+  const seen = seenRevisions.get(kind);
+  const elsewhere = !saved.stale && seen !== undefined && saved.revision > seen + 1;
+  if (!saved.stale && typeof saved.revision === 'number') seenRevisions.set(kind, saved.revision);
   for (const input of document.querySelectorAll(`[data-draft^="${kind}:"]`)) {
     const path = input.dataset.draft.slice(kind.length + 1);
     // A rule's parameters are refused by rule (the Rulebook says which parameter, in words).
@@ -161,16 +207,28 @@ async function saveDrafts(kind) {
     const holder = input.closest('td') || input.parentElement;
     const note = holder.querySelector('.draft-note')
       || holder.appendChild(el('span', {class: 'draft-note'}));
-    note.textContent = error ? `not valid: ${plainRefusal(error)}` : (input.dataset.changed ? 'draft, saved' : '');
-    note.classList.toggle('draft-error', Boolean(error));
+    const drafted = saved.values ? valueAt(saved.values, draftKeys(kind, path)) : undefined;
+    const changedElsewhere = elsewhere && input.dataset.changed && !edits.has(path)
+      && drafted !== undefined && canonicalValue(drafted) !== canonicalValue(draftValue(input));
+    note.textContent = error ? `not valid: ${plainRefusal(error)}`
+      : changedElsewhere ? `changed in another window to ${canonicalValue(drafted)}: reload to see it`
+        : (input.dataset.changed ? 'draft, saved' : '');
+    note.classList.toggle('draft-error', Boolean(error || changedElsewhere));
   }
   await refreshUncommitted();
+  return saved;
 }
 
-/* Save every held edit now, without waiting for its timer. */
-function saveEveryDraftNow() {
-  const kinds = new Set([...unsavedEdits.keys(), ...putBackEdits.keys()]);
-  return Promise.all([...kinds].map((kind) => saveDrafts(kind).catch(reportError)));
+/* Save every held edit now, without waiting for its timer, and wait for every save on its way. A
+ * save that fails is reported; ``strict`` also rejects, so a commit never runs over an edit that
+ * did not reach the draft. */
+async function saveEveryDraftNow({strict = false} = {}) {
+  const kinds = new Set([...unsavedEdits.keys(), ...putBackEdits.keys(), ...savingDrafts.keys()]);
+  const results = await Promise.allSettled([...kinds].map((kind) => saveDrafts(kind)));
+  const failed = results.find((result) => result.status === 'rejected');
+  if (!failed) return;
+  if (strict) throw failed.reason;
+  reportError(failed.reason);
 }
 
 document.addEventListener('input', (event) => {
@@ -539,8 +597,14 @@ function showNotReady() {
 }
 
 async function openCommitDialog() {
-  // What is typed and not yet saved is committed with the rest, and counted in the dialog.
-  await saveEveryDraftNow();
+  // What is typed and not yet saved is committed with the rest, and counted in the dialog. A save
+  // that failed stops here: the dialog would count, and the commit apply, a draft without it.
+  try {
+    await saveEveryDraftNow({strict: true});
+  } catch (error) {
+    reportError(new Error(`An edit could not be saved, so nothing was committed: ${error.message || error}`));
+    return;
+  }
   const preview = await api('/api/workspace/commit-preview');
   const who = await whoWrites();
   if (!who) return;
@@ -563,8 +627,10 @@ async function openCommitDialog() {
         }
         commitButton.disabled = true;
         try {
-          // A years change made in this dialog is saved first, so the commit carries it.
+          // A years change made in this dialog is saved first, so the commit carries it, and
+          // so is any save still on its way: the commit applies the draft as it is on disk.
           await yearsSaving;
+          await saveEveryDraftNow({strict: true});
           await write('/api/workspace/commit', {message: message.value, actor: who});
         } catch (error) {
           const said = plainRefusal(error.message || error);
@@ -633,9 +699,22 @@ function yearsControl(row, place) {
     else if (end !== 'present' && start > end) problem = 'The first year comes before the last.';
     note.classList.toggle('draft-error', Boolean(problem));
     if (problem) { note.textContent = `not valid: ${problem}`; return; }
-    const saved = await write('/api/workspace/draft', {kind: 'settings',
-      values: {dictionary: {years: [start, end]}}});
-    const error = (saved.errors || {})['dictionary.years'] || (saved.errors || {}).dictionary;
+    // Held and saved as every other edit is: numbered, one save at a time, kept until a save
+    // carrying it lands, so a commit (which saves every held edit first, strictly) never runs
+    // over a years change that did not reach the draft.
+    const {edits, putBack} = heldEdits('settings');
+    edits.set('dictionary.years', [start, end]);
+    putBack.delete('dictionary.years');
+    let saved;
+    try {
+      saved = await saveDrafts('settings');
+    } catch (failure) {
+      note.classList.add('draft-error');
+      note.textContent = 'not saved yet: it is sent again with the next save';
+      throw failure;
+    }
+    const errors = (saved && saved.errors) || {};
+    const error = errors['dictionary.years'] || errors.dictionary;
     note.classList.toggle('draft-error', Boolean(error));
     note.textContent = error ? `not valid: ${error}` : 'draft, saved';
     await refreshUncommitted();

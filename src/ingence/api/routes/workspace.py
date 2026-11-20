@@ -653,8 +653,32 @@ def write(
         ):
             message = "a draft names what it takes out as a list of setting names"
             raise ValueError(message)
-        saved = save_draft(project, str(body.get("kind") or ""), values, removed=removed)
-        return {"kind": saved.kind, "errors": saved.errors}
+        # A page names itself and numbers its saves, so a save that lands after a newer one from
+        # the same page changes nothing (``drafts.save_draft``).
+        writer = body.get("writer")
+        sequence = body.get("sequence")
+        numbered = (
+            isinstance(writer, str)
+            and 0 < len(writer) <= 64
+            and isinstance(sequence, int)
+            and not isinstance(sequence, bool)
+            and sequence > 0
+        )
+        saved = save_draft(
+            project,
+            str(body.get("kind") or ""),
+            values,
+            removed=removed,
+            writer=writer if numbered else None,
+            sequence=sequence if numbered else None,
+        )
+        return {
+            "kind": saved.kind,
+            "errors": saved.errors,
+            "values": saved.values,
+            "revision": saved.revision,
+            "stale": saved.stale,
+        }
     if route.endswith("/settings-import"):
         return _settings_import(project, body.get("document"))
     if route.endswith("/sheet-preview"):

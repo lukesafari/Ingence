@@ -78,10 +78,11 @@ def test_a_save_sends_the_held_edits_and_never_an_empty_draft() -> None:
 
     A save sends what the input handler held, is skipped where nothing is held, and every held
     edit is saved when the view changes and when the page closes."""
-    save = SCRIPT[SCRIPT.index("async function saveDrafts") :]
+    # ``saveDrafts`` queues a save behind the one on its way; ``sendDrafts`` is the save itself.
+    save = SCRIPT[SCRIPT.index("async function sendDrafts") :]
     save = save[: save.index("\n}\n")]
     assert "querySelectorAll" not in save.split("await write(")[0]
-    assert "if (!edits.size && !putBack.size) return;" in save
+    assert "if (!edits.size && !putBack.size) return undefined;" in save
     # app.js's one navigation function runs the workspace's hook on leaving a page, so this file
     # does not wrap showView.
     assert "showView =" not in SCRIPT
@@ -118,6 +119,8 @@ def test_the_commit_dialog_saves_what_is_held_first_and_commits_once_per_click()
     runs cannot start another."""
     dialog = SCRIPT[SCRIPT.index("async function openCommitDialog") :]
     dialog = dialog[: dialog.index("\n}\n")]
-    assert dialog.index("await saveEveryDraftNow();") < dialog.index("commit-preview")
+    # Strict: a save that failed stops the dialog before it opens
+    # (tests/test_browser_draft_order.py).
+    assert dialog.index("await saveEveryDraftNow({strict: true});") < dialog.index("commit-preview")
     assert "commitButton.disabled = true;" in dialog
     assert dialog.index("commitButton.disabled = true;") < dialog.index("/api/workspace/commit'")

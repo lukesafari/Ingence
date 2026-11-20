@@ -200,8 +200,11 @@ def test_restore_writes_only_the_preview_the_person_saw() -> None:
 def test_the_years_before_a_run_are_written_as_a_settings_draft() -> None:
     control = WORKSPACE[WORKSPACE.index("function yearsControl(") :]
     control = control[: control.index("\n}\n")]
-    assert "'/api/workspace/draft', {kind: 'settings'" in control
-    assert "values: {dictionary: {years: [start, end]}}" in control
+    # Held and saved as every settings edit is (workspace.js's numbered, one-at-a-time saves), so
+    # the draft it lands in is the settings draft, at dictionary.years.
+    assert "heldEdits('settings')" in control
+    assert "edits.set('dictionary.years', [start, end]);" in control
+    assert "saveDrafts('settings')" in control
     assert "'present'" in control
     # Shown only where the engine serving the page has the setting.
     assert "row.name === 'dictionary.years'" in WORKSPACE
