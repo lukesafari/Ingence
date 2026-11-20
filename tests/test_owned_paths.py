@@ -47,6 +47,7 @@ CHECKED = (
     "projections/explorer",
     "projections/themes",
     "jobs/logs",
+    "workspace/checkpoints",
     "workspace/drafts",
     "workspace/plans",
     "dictionary/packs",

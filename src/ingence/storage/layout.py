@@ -212,14 +212,16 @@ def spelled_otherwise(folder: Path, name: str) -> str | None:
     return ours
 
 
-#: The folders inside the top-level ones that the engine deletes, moves or replaces in. Each is
-#: checked by :func:`check_layout` as the top-level folders are. ``projections/exports`` is left
-#: out: a person names files there, and ``core/destinations.py`` has its own rule for it.
+#: The folders inside the top-level ones that the engine deletes, moves or replaces in, or publishes
+#: new files into. Each is checked by :func:`check_layout` as the top-level folders are.
+#: ``projections/exports`` is left out: a person names files there, and ``core/destinations.py``
+#: has its own rule for it.
 OWNED_SUBFOLDERS = (
     "projections/search",
     "projections/explorer",
     "projections/themes",
     "jobs/logs",
+    "workspace/checkpoints",
     "workspace/drafts",
     "workspace/plans",
     "dictionary/packs",

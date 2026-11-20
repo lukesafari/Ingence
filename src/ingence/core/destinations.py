@@ -47,8 +47,11 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import re
 import secrets
 import shutil
+import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Literal, cast
@@ -70,12 +73,15 @@ __all__ = [
     "create_exclusive",
     "declared_roots",
     "exports_folder",
+    "give_new_name",
     "in_exports",
     "joined",
     "open_appending",
+    "publish_new",
     "refusal_words",
     "refuse_existing",
     "refuse_read_only",
+    "remove_abandoned",
     "replacing",
     "typed_path",
     "where_refused",
@@ -453,6 +459,119 @@ def write_atomically(path: Path, data: str | bytes) -> None:
     does: text as UTF-8, with the platform's line endings as ``write_text`` gives them."""
     with writing_atomically(path, binary=isinstance(data, bytes)) as handle:
         handle.write(data)
+
+
+#: The errors a hard link gives on a filesystem that has no hard links (FAT and exFAT drives, some
+#: network shares). The link is then not a way to publish, and :func:`publish_new` moves instead.
+_NO_HARD_LINKS = frozenset(
+    code
+    for code in (
+        errno.EPERM,
+        errno.EXDEV,
+        errno.EMLINK,
+        getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EOPNOTSUPP", None),
+        getattr(errno, "ENOSYS", None),
+    )
+    if code is not None
+)
+
+
+def publish_new(path: Path, data: str) -> None:
+    """Write ``data`` as the new file ``path``, seen whole or not at all, and never over a file.
+
+    An append-only file (a checkpoint, a project Rulebook revision) is named by its number, and two
+    writers must never take one number. Creating the final name with ``O_EXCL`` and then writing
+    into it settles the name, but a reader can see the file before it is whole, and a write stopped
+    halfway leaves a broken file there for good. So the bytes go to a temporary file beside
+    ``path`` first (:func:`create_exclusive`), are flushed to disk, and only then get the name.
+
+    The name is given without replacing anything. A hard link from the temporary file to ``path``
+    fails where ``path`` exists, which keeps the old ``O_EXCL`` guarantee. On Windows,
+    ``os.rename`` refuses an existing target in the same way. A filesystem with no hard links
+    (:data:`_NO_HARD_LINKS`) is the one case left: there the name is checked and the file moved,
+    and two writers who both find the name free in the same instant could collide.
+
+    Raises :class:`FileExistsError` when ``path`` is already taken. On any error the temporary file
+    is removed, and ``path`` is as it was.
+    """
+    from ingence.storage.commit import fsync_directory
+
+    handle, incoming = create_exclusive(path, binary=False)
+    try:
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _give_name(incoming, path)
+    finally:
+        with contextlib.suppress(OSError):
+            incoming.unlink(missing_ok=True)
+    fsync_directory(path.parent)
+
+
+def give_new_name(incoming: Path, path: Path) -> None:
+    """Give the whole file at ``incoming`` the name ``path`` where nothing has it yet, and leave
+    nothing at ``incoming``. Raises :class:`FileExistsError`, with ``path`` untouched and
+    ``incoming`` kept, where ``path`` is taken (by a file or a link)."""
+    _give_name(incoming, path)
+    with contextlib.suppress(OSError):
+        incoming.unlink(missing_ok=True)
+
+
+def _give_name(incoming: Path, path: Path) -> None:
+    """Give the whole file at ``incoming`` the name ``path`` where nothing has it yet."""
+    if os.name == "nt":
+        os.rename(incoming, path)
+        return
+    try:
+        os.link(incoming, path)
+    except FileExistsError:
+        raise
+    except OSError as error:
+        if error.errno not in _NO_HARD_LINKS:
+            raise
+        if os.path.lexists(path):
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(path)) from error
+        os.rename(incoming, path)
+
+
+#: How old a temporary file must be before :func:`remove_abandoned` takes it for a dead writer's.
+#: A publish writes one small file and takes a moment, so an hour is far past any live writer.
+ABANDONED_SECONDS = 3600.0
+
+
+def remove_abandoned(directory: Path, name: str, *, now: float | None = None) -> list[Path]:
+    """Remove the temporary files that writers of ``name``'s kind left in ``directory`` and
+    abandoned, and return what was removed.
+
+    A temporary file is the shape :func:`create_exclusive` makes (``.<name>.<process>.<hex>.
+    incoming``) with a final name starting with ``name``. It is removed only when it is a plain
+    file, never a link or a folder, and has not changed for :data:`ABANDONED_SECONDS`. A writer
+    still at work is never that slow, so a live writer's file is never removed.
+    """
+    shape = re.compile(rf"\.{re.escape(name)}.*\.\d+\.[0-9a-f]{{8}}\.incoming")
+    moment = time.time() if now is None else now
+    removed: list[Path] = []
+    try:
+        listed = list(os.scandir(directory))
+    except OSError:
+        return removed
+    for found in listed:
+        if not shape.fullmatch(found.name):
+            continue
+        try:
+            status = found.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        if not stat.S_ISREG(status.st_mode):
+            continue
+        if moment - status.st_mtime < ABANDONED_SECONDS:
+            continue
+        with contextlib.suppress(OSError):
+            os.unlink(found.path)
+            removed.append(Path(found.path))
+    return removed
 
 
 def open_appending(path: Path, *, binary: bool = False) -> IO[Any]:

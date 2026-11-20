@@ -38,7 +38,6 @@ nothing either.
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -173,7 +172,13 @@ def _write(project: Path, fields: dict[str, Any]) -> Checkpoint:
     read still holds its number. Where another writer takes the number first, the next one is
     tried. Each try takes a higher number than the last, so the loop ends.
     """
-    directory = _directory(project)
+    from ingence.core.destinations import publish_new, remove_abandoned
+    from ingence.storage.layout import owned_path
+
+    # The project's own checkpoints folder, nothing on the way to it a link, checked at the write
+    # and not only when the project was opened (``owned_path``). A folder swapped for a link would
+    # otherwise put the checkpoint in whatever it leads to, a folder of source data included.
+    directory = owned_path(project, _directory(project))
     directory.mkdir(parents=True, exist_ok=True)
     sequence = 0
     while True:
@@ -187,18 +192,43 @@ def _write(project: Path, fields: dict[str, Any]) -> Checkpoint:
         }
         body["checkpoint_id"] = "checkpoint_" + digest_text(canonical_json(body))[:24]
         checkpoint = Checkpoint(**body)
+        text = json.dumps(asdict(checkpoint), sort_keys=True, indent=2, default=list)
         try:
-            descriptor = os.open(
-                directory / f"{sequence:06d}.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644
-            )
+            # Whole before it has its name, and never over a checkpoint that has it, so a reader
+            # never meets half a checkpoint and a stopped write leaves none (``publish_new``).
+            publish_new(owned_path(project, directory / f"{sequence:06d}.json"), text)
         except FileExistsError:
             continue
         break
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(asdict(checkpoint), sort_keys=True, indent=2, default=list))
-        handle.flush()
-        os.fsync(handle.fileno())
+    remove_abandoned(directory, "")
     return checkpoint
+
+
+def _already_appended(project: Path, drafted: dict[str, Any]) -> bool:
+    """Whether a commit stopped before its checkpoint already appended this draft's revision.
+
+    The draft is cleared only once the checkpoint is recorded, so a commit stopped between its
+    revision and its checkpoint is committed again with the same draft. Its revision is then the
+    project's last, appended after the last checkpoint's, and overrides exactly these rules with
+    exactly these values. Appending it again would add a second copy to the append-only Rulebook.
+    """
+    from ingence.rulebook.load import ChangeVerb, load_project_revisions
+    from ingence.storage.layout import RULEBOOK_DIR
+
+    revisions = load_project_revisions(project / RULEBOOK_DIR)
+    if not revisions:
+        return False
+    last = max(revisions, key=lambda revision: revision.number)
+    recorded = list_checkpoints(project)
+    if recorded and recorded[-1].project_revision >= last.number:
+        return False
+    wanted = overrides_of(drafted)
+    written = {
+        change.rule_id: dict(change.parameters or {})
+        for change in last.changes
+        if change.verb is ChangeVerb.OVERRIDE
+    }
+    return len(written) == len(last.changes) and written == wanted
 
 
 def _in_force(values: dict[str, Any]) -> dict[str, Any]:
@@ -239,10 +269,17 @@ def commit(project: Path, *, actor: str, message: str, now: str | None = None) -
 
 
 def _commit(project: Path, *, actor: str, message: str, now: str | None) -> Checkpoint:
+    from ingence.storage.layout import RULEBOOK_DIR, owned_path
+
     who = " ".join(actor.split())
     if not who:
         text = "a commit names who is committing"
         raise ValueError(text)
+    # Every folder the commit writes in is checked before the first write, not only at its own: a
+    # commit refused at its checkpoint after laying in the settings and a revision would leave
+    # both written, and a second try would append the revision again.
+    owned_path(project, _directory(project))
+    owned_path(project, RULEBOOK_DIR)
     said = " ".join(message.split()) or "Changes"
     settings_draft = read_draft(project, "settings")
     parameter_draft = read_draft(project, "rule_parameters")
@@ -269,7 +306,7 @@ def _commit(project: Path, *, actor: str, message: str, now: str | None) -> Chec
             ),
         )
     changed_rules = tuple(overrides_of(parameter_draft.values))
-    if changed_rules:
+    if changed_rules and not _already_appended(project, parameter_draft.values):
         write_revision(
             project, parameter_draft.values, summary=f"Dashboard commit by {who}: {said}"
         )

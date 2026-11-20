@@ -16,7 +16,6 @@ would become parameter names, and the Rulebook would then refuse to load.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -99,14 +98,18 @@ def write_revision(project: Path, overrides: Mapping[str, object], *, summary: s
 
     Refuses (``ValueError``, nothing written) where :func:`check_overrides` finds any.
     """
+    from ingence.core.destinations import publish_new, remove_abandoned
     from ingence.rulebook.load import load_project_revisions
-    from ingence.storage.layout import RULEBOOK_DIR
+    from ingence.storage.layout import RULEBOOK_DIR, owned_path
 
     refused = check_overrides(project, overrides)
     if refused:
         message = "; ".join(f"{rule_id}: {why}" for rule_id, why in refused.items())
         raise ValueError(message)
-    directory = project / RULEBOOK_DIR
+    # The project's own Rulebook folder, nothing on the way to it a link, checked at the write and
+    # not only when the project was opened: a folder swapped for a link since then would take the
+    # revision into whatever it leads to, a folder of source data included.
+    directory = owned_path(project, RULEBOOK_DIR)
     directory.mkdir(parents=True, exist_ok=True)
     number = next_number(project, load_project_revisions(directory))
     document = {
@@ -117,9 +120,15 @@ def write_revision(project: Path, overrides: Mapping[str, object], *, summary: s
             for rule_id, parameters in overrides_of(overrides).items()
         ],
     }
-    path = directory / f"project-{number:04d}.yaml"
-    # Created exclusively, so two commits can never take one number.
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        yaml.safe_dump(document, handle, sort_keys=False)
+    # Serialised and read back before anything is written. A revision the Rulebook cannot parse
+    # would stop every later open of the project.
+    text = yaml.safe_dump(document, sort_keys=False)
+    if yaml.safe_load(text) != document:  # pragma: no cover - safe_dump round-trips plain data
+        message = f"project revision {number} did not read back as it was written"
+        raise ValueError(message)
+    path = owned_path(project, RULEBOOK_DIR, f"project-{number:04d}.yaml")
+    # Whole before it has its name, and never over a revision that has it: two commits can never
+    # take one number, and a stopped write leaves no half a revision (``publish_new``).
+    publish_new(path, text)
+    remove_abandoned(directory, "project-")
     return number
