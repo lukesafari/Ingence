@@ -8,6 +8,7 @@ to load in words rather than being fetched. A connection opened any other way is
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -219,3 +220,50 @@ def test_the_graph_workspace_s_times_are_the_same_with_or_without_time_zone_supp
         assert said["workspace"]["arrange"] == expected, zone
         followed_the_clock.append(said["zone_unset"]["timeline"] != expected)
     assert all(followed_the_clock)
+
+
+def test_a_spill_folder_somebody_else_planted_as_a_link_is_never_spilled_into(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a shared ``/tmp`` another person can make the spill folder's name first, as a link into
+    a folder of data. The engine never spills through it: it uses a private folder of its own."""
+    from ingence.storage import connection
+
+    data = tmp_path / "data"
+    data.mkdir()
+    planted = tmp_path / "ingence-duckdb-planted"
+    try:
+        planted.symlink_to(data, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this system does not let a test make a symbolic link")
+    monkeypatch.setattr(connection, "SPILL_DIRECTORY", planted)
+    connection.spill_directory.cache_clear()
+    try:
+        chosen = connection.spill_directory()
+        assert chosen != planted
+        assert not chosen.is_symlink() and chosen.is_dir()
+        with connection.connect(memory_limit="64MB", threads=1) as made:
+            row = made.execute("SELECT current_setting('temp_directory')").fetchone()
+            assert row is not None and Path(str(row[0])) == chosen
+            # A table larger than the memory allowed spills while the connection is open.
+            made.execute(
+                "CREATE TEMP TABLE sorted AS "
+                "SELECT i, (i * 7919) % 1000003 AS b FROM range(8000000) t(i) ORDER BY b"
+            )
+            assert any(path.name.startswith("duckdb_temp") for path in chosen.iterdir())
+        assert list(data.iterdir()) == []
+    finally:
+        connection.spill_directory.cache_clear()
+
+
+def test_the_spill_folder_is_this_persons_alone() -> None:
+    import stat as stat_module
+
+    from ingence.storage import connection
+
+    chosen = connection.spill_directory()
+    status = os.lstat(chosen)
+    assert stat_module.S_ISDIR(status.st_mode)
+    if hasattr(os, "getuid"):
+        assert status.st_uid == os.getuid()
+        assert not status.st_mode & 0o022

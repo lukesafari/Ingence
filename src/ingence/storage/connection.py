@@ -22,12 +22,16 @@ support answers. A zone given at opening fails here in words and fetches nothing
 Nothing spills beside wherever the process started. An in-memory connection spills a query larger
 than its memory limit to ``temp_directory``, which is ``.tmp`` relative to the working directory by
 default. A Dashboard or a command started inside a root would write there. Ingence never writes
-inside the folders it reads. The connection spills
-into a folder of the system's own temporary directory instead.
+inside the folders it reads. The connection spills into a folder of the system's own temporary
+directory instead, one private to the person and checked before it is used
+(:func:`spill_directory`).
 """
 
 from __future__ import annotations
 
+import functools
+import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -41,23 +45,80 @@ __all__ = [
     "arrow_reader",
     "arrow_table",
     "connect",
+    "spill_directory",
 ]
 
-#: Where a connection spills a query larger than its memory: the system's temporary folder.
-SPILL_DIRECTORY = Path(tempfile.gettempdir()) / "ingence-duckdb"
+
+def _named_for_this_person() -> Path:
+    """The spill folder's name: in the system's temporary folder, and this person's alone.
+
+    On Linux the temporary folder (``/tmp``) is shared by everybody on the machine, a lab server or
+    a cluster's login node among them. A fixed name there could be made first by somebody else, as
+    a link into a folder of data, and every spill would then be written there; or made first by a
+    colleague, and nobody else could spill at all. So the name carries the person's user number,
+    and :func:`spill_directory` checks the folder before any connection uses it.
+    """
+    owner = os.getuid() if hasattr(os, "getuid") else "user"
+    return Path(tempfile.gettempdir()) / f"ingence-duckdb-{owner}"
+
+
+#: Where a connection spills a query larger than its memory, where that folder passes
+#: :func:`spill_directory`'s check.
+SPILL_DIRECTORY = _named_for_this_person()
 
 #: Where a connection looks for extensions: a folder of the engine's own that nothing writes
 #: (DuckDB creates it only to install, and the engine installs nothing), never ``~/.duckdb``.
 EXTENSION_DIRECTORY = SPILL_DIRECTORY / "no-extensions"
 
 
+@functools.cache
+def spill_directory() -> Path:
+    """The folder connections spill into, made private to this person and checked.
+
+    It must be a real folder (never a link), owned by this person, and writable by nobody else.
+    One that fails (somebody else made it, or made it a link) is never used: the process spills
+    into a new private folder of its own instead (``tempfile.mkdtemp``, made with this person's
+    permissions alone), so a planted link never receives a spill and nobody is kept from spilling.
+    """
+    try:
+        os.mkdir(SPILL_DIRECTORY, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        return _private_for_this_process()
+    try:
+        status = os.lstat(SPILL_DIRECTORY)
+    except OSError:
+        return _private_for_this_process()
+    trusted = (
+        stat.S_ISDIR(status.st_mode)
+        and not os.path.isjunction(SPILL_DIRECTORY)
+        and (not hasattr(os, "getuid") or status.st_uid == os.getuid())
+        and (os.name == "nt" or not status.st_mode & 0o022)
+    )
+    if trusted:
+        return SPILL_DIRECTORY
+    return _private_for_this_process()
+
+
+def _private_for_this_process() -> Path:
+    """A new spill folder only this person can use, removed when the process ends."""
+    import atexit
+    import shutil
+
+    made = Path(tempfile.mkdtemp(prefix="ingence-duckdb-"))
+    atexit.register(shutil.rmtree, made, ignore_errors=True)
+    return made
+
+
 def connect(database: str = ":memory:", **config: Any) -> duckdb.DuckDBPyConnection:
     """A DuckDB connection that installs and loads nothing: ``config`` adds to the settings."""
+    spill = spill_directory()
     settings = {
         "autoinstall_known_extensions": False,
         "autoload_known_extensions": False,
-        "extension_directory": str(EXTENSION_DIRECTORY),
-        "temp_directory": str(SPILL_DIRECTORY),
+        "extension_directory": str(spill / "no-extensions"),
+        "temp_directory": str(spill),
         **config,
     }
     return duckdb.connect(database, config=settings)
