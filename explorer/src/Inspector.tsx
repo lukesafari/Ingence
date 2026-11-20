@@ -865,17 +865,22 @@ function FileList({folder, scope, start, n, run, labels, onSelect, window, filte
   const [page, setPage] = useState<FilesResponse | null>(null);
   const [error, setError] = useState('');
   useEffect(() => setOffset(0), [folder, scope, start, n, filterKey]);
+  // Nothing to list asks for nothing: a period re-binned under a new window can hold no files,
+  // and the server refuses a page of none.
+  const size = Math.min(PAGE, n - offset);
   useEffect(() => {
+    if (size <= 0) return undefined;
     const controller = new AbortController();
     setError('');
-    api.files(folder, scope, start + offset, Math.min(PAGE, n - offset), run || undefined, controller.signal, window, filters)
+    api.files(folder, scope, start + offset, size, run || undefined, controller.signal, window, filters)
       .then(setPage)
       .catch((failure: unknown) => {
         if ((failure as Error).name !== 'AbortError') setError((failure as Error).message);
       });
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the filters are keyed by their text
-  }, [folder, scope, start, n, offset, run, window?.source, window?.from, window?.to, filterKey]);
+  }, [folder, scope, start, n, offset, size, run, window?.source, window?.from, window?.to, filterKey]);
+  if (size <= 0) return <p className="ix-note">No files here.</p>;
   if (error) return <p className="ix-warn">{error}</p>;
   if (!page) return <p className="ix-note">Reading…</p>;
   return (
