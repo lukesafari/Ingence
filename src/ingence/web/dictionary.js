@@ -10,7 +10,8 @@
  * so app.js is not edited. The header's Export and Import buttons (transfer.js's dictionary entry)
  * call window.ingenceDictionaryExport() and installPack(file), as the Packs section's own do. */
 
-const dictState = {q: '', origin: '', kind: '', order: '', offset: 0, term: '', flash: ''};
+const dictState = {q: '', origin: '', kind: '', order: '', offset: 0, term: '', flash: '',
+  detailOwed: false};
 
 const ORIGIN_WORDS = {core: 'Core', domain: 'Domain', laboratory: 'Laboratory',
   yours: 'Yours', inactive: 'Inactive'};
@@ -44,6 +45,11 @@ async function showDictionary(options) {
   /* A search redraws the list only: the word open beside it is left as it is, with whatever is
    * being typed there (a late redraw would empty the spelling being added). */
   const keepDetail = Boolean(options && options.keepDetail === true);
+  /* A redraw that is not a search owes the open word a redraw too, and the debt stands until the
+   * word is drawn. A search's redraw that takes the list's turn from it (its timer firing while an
+   * answer is on its way) then still redraws the word, rather than leaving it as it was before the
+   * answer. */
+  if (!keepDetail) dictState.detailOwed = true;
   const turn = turns.claim(listPane);
   const query = new URLSearchParams({offset: String(dictState.offset)});
   if (dictState.q) query.set('q', dictState.q);
@@ -96,7 +102,7 @@ async function showDictionary(options) {
    * view opens its first row. A click or a search moves it. */
   if (!dictState.term && first) first.classList.add('selected');
   const open = dictState.term || (first && first.dataset.term);
-  if (keepDetail && open && detailPane.dataset.term === open) return;
+  if (keepDetail && !dictState.detailOwed && open && detailPane.dataset.term === open) return;
   if (open) showTerm(open).catch((error) => states.failed(detailPane, error));
   else fill(detailPane, el('p', {class: 'empty', text: 'Choose a word.'}));
 }
@@ -295,6 +301,7 @@ async function showTerm(term) {
   const turn = turns.claim(detailPane);
   const data = await api(`/api/dictionary/term?term=${encodeURIComponent(term)}`);
   if (!turns.owns(detailPane, turn)) return;
+  dictState.detailOwed = false;
   const refresh = async () => { await showDictionary(); };
   const senseButton = data.inactive
     ? el('button', {type: 'button', class: 'answer', 'data-help': 'dictionary.reactivate',
