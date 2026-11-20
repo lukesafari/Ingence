@@ -42,6 +42,22 @@ checkpoints' estimate are then named in ``rules_kept`` and nothing is returned. 
 version recorded the rules that are now the shipped revision 4 as the project's revision 1. A run
 made then has its Rulebook rebuilt that way from the retired file, where it stands or where
 ``ingence fix`` set it aside, so restoring it returns its parameters as for any other run.
+
+A restore is finished, or finished later, never left half done. It writes four things: the
+Dashboard's settings file, a project Rulebook revision, a ``withdraw`` event and the ``CURRENT``
+pointer. No single write covers all four, so a restore stopped between two (an error, a killed
+process, a power cut) used to leave some written and some not: decisions withdrawn while the old
+run stayed current. Now, once everything has been checked and before anything is written, the
+restore records what it will write, whole, in ``workspace/restore-intent.json``. Each step is one
+that can be taken again without doubling: the settings file and the pointer are written to the same
+values, a revision already appended for this intent is found by its number and summary, and a
+withdrawal already appended for it is found by the intent's identifier in its payload. The record
+is removed once all four are written. Where it is found standing, the restore it names is finished
+(:func:`finish_interrupted_restore`) before another restore or a commit is made, and when the
+Dashboard starts. Finishing it again changes nothing. Because the Rulebook and the Record are
+append-only, going forward is the one way back to a coherent project: a step already written cannot
+be unwritten without writing more. The pointer is moved only from the run the restore left, so a
+run published since the interruption is never replaced.
 """
 
 from __future__ import annotations
@@ -63,16 +79,20 @@ from ingence.storage.commit import (
     run_path,
     write_pointer,
 )
-from ingence.workspace.drafts import WRITING
+from ingence.workspace.drafts import writing
 from ingence.workspace.settings_overlay import flatten, read_layers, write_dashboard_settings
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 __all__ = [
+    "INTENT_FILE",
     "NOT_A_PERSON",
+    "RestoreInterruptedError",
     "RestorePlan",
     "RestoreRefusedError",
+    "finish_interrupted_restore",
+    "interrupted_restore",
     "restore",
     "restore_plan",
 ]
@@ -83,6 +103,16 @@ NOT_A_PERSON = frozenset({"ingence", "engine", "system"})
 
 class RestoreRefusedError(ValueError):
     """A restore that is not written, and why, in words a person reads."""
+
+
+class RestoreInterruptedError(ValueError):
+    """A restore that was begun and could not be finished. What it set out to write is recorded
+    (:data:`INTENT_FILE`), and it is finished before anything else changes the project."""
+
+
+#: Where a restore records what it will write, before it writes any of it. Present only while a
+#: restore is under way, or was stopped before it finished.
+INTENT_FILE = "restore-intent.json"
 
 
 @dataclass(frozen=True)
@@ -320,7 +350,10 @@ def restore(
         message = f"{who} is not a person; only a person goes back to an earlier run"
         raise RestoreRefusedError(message)
     stamp = now or dt.datetime.now(dt.UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
-    with WRITING:
+    with writing(project):
+        # A restore stopped before it finished is finished first: the plan below is read from the
+        # project as that restore left it.
+        _finish(project)
         plan = restore_plan(project, run_id)
         if plan.digest != previewed:
             message = (
@@ -350,67 +383,303 @@ def restore(
                 said = "; ".join(f"{rule}: {why}" for rule, why in sorted(refused.items()))
                 message = f"the rule parameters of that run cannot be returned ({said})"
                 raise RestoreRefusedError(message)
+        settings: dict[str, Any] | None = None
         if plan.settings:
-            # Written first, and validated as it is written: a settings file that would not load
-            # stops the restore before anything reaches the Record.
             from ingence.workspace.checkpoints import list_checkpoints
 
             chosen = next(
                 (c for c in list_checkpoints(project) if c.checkpoint_id == plan.checkpoint_id),
                 None,
             )
+            settings = dict(chosen.dashboard_settings) if chosen is not None else {}
+            # Checked before anything is written: a settings file that would not load stops the
+            # restore here, with nothing written.
+            _check_settings(project, settings)
+        manifest_digest: str | None = None
+        if plan.current_run_id != run_id:
+            manifest = Manifest.model_validate_json(
+                manifest_path(project, run_id).read_text(encoding="utf-8")
+            )
+            manifest_digest = manifest.digest()
+        intent = _intent(
+            project,
+            plan,
+            who=who,
+            stamp=stamp,
+            settings=settings,
+            returned=returned,
+            manifest_digest=manifest_digest,
+        )
+        _write_intent(project, intent)
+        try:
+            done = _carry_out(project, intent)
+        except Exception as error:
+            message = (
+                f"the restore to {run_id} was stopped before it finished ({error}). What it set "
+                f"out to write is recorded in workspace/{INTENT_FILE}, and it is finished before "
+                "anything else changes the project: restore again, commit, or reopen the Dashboard."
+            )
+            raise RestoreInterruptedError(message) from error
+        _clear_intent(project)
+    return done
+
+
+def _check_settings(project: Path, values: dict[str, Any]) -> None:
+    """Refuse settings that the Dashboard's file could not hold over ``settings.yaml``, before a
+    restore writes anything: the check ``write_dashboard_settings`` makes when it replaces the
+    file, made first, so a restore never records an intent it cannot carry out."""
+    from pydantic import ValidationError
+
+    from ingence.core.settings import Settings
+    from ingence.workspace.settings_overlay import merged
+
+    try:
+        Settings.model_validate(merged(read_layers(project).hand, values))
+    except ValidationError as error:
+        said = "; ".join(
+            f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}"
+            for item in error.errors()
+        )
+        message = f"the settings of that run cannot be returned ({said})"
+        raise RestoreRefusedError(message) from error
+
+
+def _intent(
+    project: Path,
+    plan: RestorePlan,
+    *,
+    who: str,
+    stamp: str,
+    settings: dict[str, Any] | None,
+    returned: dict[str, dict[str, Any]],
+    manifest_digest: str | None,
+) -> dict[str, Any]:
+    """Everything a restore will write, decided before it writes any of it."""
+    from ingence.rulebook.load import load_project_revisions
+    from ingence.storage.layout import RULEBOOK_DIR
+
+    revisions = load_project_revisions(project / RULEBOOK_DIR)
+    body: dict[str, Any] = {
+        "version": 1,
+        "run_id": plan.run_id,
+        "previous_run": plan.current_run_id,
+        "actor": who,
+        "stamp": stamp,
+        "previewed": plan.digest,
+        "watermark": plan.watermark,
+        "watermark_from": plan.watermark_from,
+        "withdraw": list(plan.withdraw),
+        "settings": settings,
+        "settings_named": sorted(plan.settings),
+        "returned": returned,
+        "revision_summary": (
+            f"Restore by {who} on {stamp[:10]} to {plan.run_id}: parameters as they were"
+        ),
+        "revisions_before": max((item.number for item in revisions), default=0),
+        "manifest_digest": manifest_digest,
+        "rules_kept": list(plan.rules_kept),
+        "rules_reverted": sorted(plan.rules_reverted),
+    }
+    body["intent_id"] = "restore_" + digest_text(canonical_json(body))[:24]
+    return body
+
+
+def _intent_path(project: Path) -> Path:
+    from ingence.storage.layout import owned_path
+    from ingence.workspace import WORKSPACE_DIR
+
+    return owned_path(project, WORKSPACE_DIR, INTENT_FILE)
+
+
+def _write_intent(project: Path, intent: dict[str, Any]) -> None:
+    from ingence.core.destinations import write_atomically
+
+    path = _intent_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_atomically(path, json.dumps(intent, sort_keys=True, indent=2))
+
+
+def _clear_intent(project: Path) -> None:
+    import time
+
+    from ingence.storage.commit import fsync_directory
+
+    path = _intent_path(project)
+    for _ in range(50):
+        try:
+            path.unlink(missing_ok=True)
+            break
+        except PermissionError:  # pragma: no cover - Windows, while another reader has it open
+            time.sleep(0.02)
+    else:  # pragma: no cover - said in the error it raises
+        path.unlink(missing_ok=True)
+    fsync_directory(path.parent)
+
+
+def interrupted_restore(project: Path) -> dict[str, Any] | None:
+    """The restore that was begun and not finished, as it was recorded, or None."""
+    path = _intent_path(project)
+    if not path.is_file():
+        return None
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict) or not loaded.get("intent_id"):
+        message = f"workspace/{INTENT_FILE} does not describe a restore"
+        raise RestoreInterruptedError(message)
+    return loaded
+
+
+def _carry_out(project: Path, intent: dict[str, Any]) -> dict[str, Any]:
+    """Write what ``intent`` records, each step skipped where it is already written."""
+    run_id = str(intent["run_id"])
+    who = str(intent["actor"])
+    stamp = str(intent["stamp"])
+    # A step the project now refuses (a setting an upgrade renamed, a parameter the Rulebook no
+    # longer takes) is left out and named, never tried for ever: the restore checked both before it
+    # began, so only a change made since can refuse them. A failure to write (a full disk) is not a
+    # refusal, and leaves the restore to be finished later.
+    not_returned: list[str] = []
+    if intent.get("settings") is not None:
+        from pydantic import ValidationError
+
+        try:
+            # The same values written again give the same file.
             write_dashboard_settings(
                 project,
-                chosen.dashboard_settings if chosen is not None else {},
+                intent["settings"],
                 provenance=dict.fromkeys(
-                    plan.settings, f"restored by {who} on {stamp[:10]} to {run_id}"
+                    intent["settings_named"], f"restored by {who} on {stamp[:10]} to {run_id}"
                 ),
                 replace=True,
             )
-        revision: int | None = None
-        if returned:
-            from ingence.workspace.revisions import write_revision
+        except (ValueError, ValidationError):
+            not_returned.append("settings")
+    revision: int | None = None
+    if intent.get("returned"):
+        revision = _revision_for(project, intent)
+        if revision is None:
+            from ingence.workspace.revisions import check_overrides, write_revision
 
-            revision = write_revision(
-                project,
-                returned,
-                summary=f"Restore by {who} on {stamp[:10]} to {run_id}: parameters as they were",
-            )
-        written: RecordEvent | None = None
-        if plan.withdraw:
+            if check_overrides(project, intent["returned"]):
+                not_returned.append("rule parameters")
+            else:
+                revision = write_revision(
+                    project, intent["returned"], summary=str(intent["revision_summary"])
+                )
+    written: RecordEvent | None = None
+    if intent.get("withdraw"):
+        written = _withdrawal_for_intent(project, intent)
+        if written is None:
             written = append_event(
                 project,
                 kind=RecordEventKind.WITHDRAW,
                 actor=who,
                 occurred_at=stamp,
                 target=restore_target(run_id),
-                against_run_id=plan.current_run_id or run_id,
+                against_run_id=str(intent.get("previous_run") or run_id),
                 payload={
-                    "withdrawn": list(plan.withdraw),
+                    "withdrawn": list(intent["withdraw"]),
                     "restored_to": run_id,
-                    "previewed": plan.digest,
-                    "watermark": plan.watermark,
-                    "watermark_from": plan.watermark_from,
+                    "previewed": intent["previewed"],
+                    "watermark": intent["watermark"],
+                    "watermark_from": intent["watermark_from"],
+                    # How a restore finished later knows this withdrawal is already written.
+                    "restore_intent": intent["intent_id"],
                 },
             )
-        if plan.current_run_id != run_id:
-            manifest = Manifest.model_validate_json(
-                manifest_path(project, run_id).read_text(encoding="utf-8")
-            )
+    if intent.get("manifest_digest"):
+        pointer = read_pointer(project)
+        named = pointer.run_id if pointer else None
+        # Moved only from the run the restore left: a run published since is never replaced.
+        if named != run_id and named == intent.get("previous_run"):
             write_pointer(
                 project,
-                CurrentPointer(run_id=run_id, manifest_digest=manifest.digest(), updated_at=stamp),
+                CurrentPointer(
+                    run_id=run_id,
+                    manifest_digest=str(intent["manifest_digest"]),
+                    updated_at=stamp,
+                ),
             )
     return {
         "restored_to": run_id,
-        "previous_run": plan.current_run_id,
+        "previous_run": intent.get("previous_run"),
         "withdrawal": written.event_id if written is not None else None,
-        "withdrawn": len(plan.withdraw),
-        "settings_restored": sorted(plan.settings),
-        "rules_kept": list(plan.rules_kept),
-        "rules_reverted": sorted(plan.rules_reverted),
+        "withdrawn": len(intent.get("withdraw") or ()),
+        "settings_restored": list(intent.get("settings_named") or ()),
+        "rules_kept": list(intent.get("rules_kept") or ()),
+        "rules_reverted": list(intent.get("rules_reverted") or ()),
         "revision": revision,
+        "not_returned": not_returned,
     }
+
+
+def _revision_for(project: Path, intent: dict[str, Any]) -> int | None:
+    """The revision this restore already appended, found by its summary among those appended
+    since the restore began, or None."""
+    from ingence.rulebook.load import load_project_revisions
+    from ingence.storage.layout import RULEBOOK_DIR
+
+    floor = int(intent.get("revisions_before") or 0)
+    for item in load_project_revisions(project / RULEBOOK_DIR):
+        if item.number > floor and item.summary == intent["revision_summary"]:
+            return int(item.number)
+    return None
+
+
+def _withdrawal_for_intent(project: Path, intent: dict[str, Any]) -> RecordEvent | None:
+    """The withdrawal this restore already appended, found by the intent named in it, or None."""
+    for event in read_events(project, held=False, withdrawn=True, moved=False):
+        if event.kind is not RecordEventKind.WITHDRAW:
+            continue
+        detail = json.loads(event.payload or "{}")
+        if detail.get("restore_intent") == intent["intent_id"]:
+            return event
+    return None
+
+
+def _finish(project: Path) -> dict[str, Any] | None:
+    """Finish the restore recorded as begun, where one is; the caller holds the locks."""
+    intent = interrupted_restore(project)
+    if intent is None:
+        return None
+    try:
+        done = _carry_out(project, intent)
+    except Exception as error:
+        message = (
+            f"a restore to {intent.get('run_id')} was stopped before it finished, and it could "
+            f"not be finished now ({error}). What it set out to write is in "
+            f"workspace/{INTENT_FILE}. Nothing else is written until it is finished: put right "
+            "what stopped it and try again, or, to give the rest of it up, remove that file."
+        )
+        raise RestoreInterruptedError(message) from error
+    _clear_intent(project)
+    return done
+
+
+def finish_interrupted_restore(project: Path) -> dict[str, Any] | None:
+    """Finish a restore that was begun and not finished; return what it did, or None where there
+    was none. Taking it again finds nothing to do.
+
+    Holds the project's publish lock, as the restore did, and the workspace's writing lock. Where
+    a job is publishing, the lock is not waited for, and the restore is finished by the next
+    caller (:class:`RestoreInterruptedError` says so).
+    """
+    begun = interrupted_restore(project)
+    if begun is None:
+        return None
+    from ingence.jobs.locks import ProjectBusyError, publishing
+
+    try:
+        with (
+            publishing(project, command="finishing an interrupted restore", wait=False),
+            writing(project),
+        ):
+            return _finish(project)
+    except ProjectBusyError as error:
+        message = (
+            f"a restore to {begun.get('run_id')} was stopped before it finished, and {error.said} "
+            "It is finished once that is done; nothing else is written until then."
+        )
+        raise RestoreInterruptedError(message) from error
 
 
 #: What :func:`_revision_used` answers where only the shipped Rulebook's digest is the run's, and

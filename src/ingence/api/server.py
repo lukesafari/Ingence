@@ -1886,6 +1886,15 @@ class DashboardServer:
         """Supervise the project's jobs, and read its Record while the first page loads."""
         assert self._project is not None
         assert self.applier is not None
+        # A restore that a stopped process left half done is finished as the project is taken up,
+        # whether it was named when the server started or opened later from the landing page,
+        # before the supervisor starts any job. The server may already be answering requests by
+        # then; a commit or a restore made meanwhile finishes it first in any case. Where it cannot
+        # be finished yet (another program is publishing), they refuse until it has.
+        from ingence.workspace.restore import finish_interrupted_restore
+
+        with contextlib.suppress(Exception):
+            finish_interrupted_restore(self._project)
         # The server supervises jobs from the start. It finds what a server that died left
         # running, says so (``applier.reconciled``), and queues it again.
         self.applier.start()

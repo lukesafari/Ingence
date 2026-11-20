@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 from ingence.core.ids import canonical_json, digest_text
 from ingence.workspace import WORKSPACE_DIR, WORKSPACE_VERSION
-from ingence.workspace.drafts import WRITING, clear_draft, read_draft, settings_errors
+from ingence.workspace.drafts import clear_draft, read_draft, settings_errors, writing
 from ingence.workspace.rerun import Step, needs_of_settings
 from ingence.workspace.revisions import check_overrides, overrides_of, write_revision
 from ingence.workspace.settings_overlay import (
@@ -261,10 +261,22 @@ def _changed(
 def commit(project: Path, *, actor: str, message: str, now: str | None = None) -> Checkpoint:
     """Apply the settings and rule-parameter drafts, and record a checkpoint.
 
-    Holds :data:`drafts.WRITING` throughout, so a draft saved meanwhile waits for it and is kept,
-    and two commits never run at once.
+    Holds the drafts' lock throughout (:func:`drafts.writing`), so a draft saved meanwhile, by this
+    program or another serving the project, waits for it and is kept, and two commits never run at
+    once.
     """
-    with WRITING:
+    from ingence.workspace.restore import finish_interrupted_restore, interrupted_restore
+
+    # A restore holds the same lock for the whole of its writing, so a restore's record seen with
+    # the lock held is one that was stopped, never one still running: a commit made while a
+    # restore runs simply waits for it.
+    with writing(project):
+        if interrupted_restore(project) is None:
+            return _commit(project, actor=actor, message=message, now=now)
+    # It is finished first (with the project's publish lock, which the lock above is never held
+    # around), so this commit is measured against the project the restore meant to leave.
+    finish_interrupted_restore(project)
+    with writing(project):
         return _commit(project, actor=actor, message=message, now=now)
 
 
