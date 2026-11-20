@@ -315,6 +315,142 @@ def test_a_stop_hands_out_nothing_more_and_keeps_what_the_workers_finish(tmp_pat
     assert live_child_count() == 0
 
 
+@pytest.mark.parametrize("how", ["token", "clock"])
+def test_a_stop_gives_the_files_in_hand_a_grace_and_then_stops_them(
+    tmp_path, monkeypatch, how: str
+) -> None:
+    """A file's deadline grows with its size, so a stop that waited on the files in hand could
+    wait hours. A stop, the token's or the caller's own clock running out, gives them the stop's
+    grace. A worker still holding one after it is killed, and the file is recorded as stopped:
+    not reached, and no error against it, because it was only interrupted. A file that finished
+    within the grace is kept."""
+    import threading
+
+    from ingence.executors import pool as pool_module
+
+    monkeypatch.setattr(pool_module, "STOP_GRACE_SECONDS", 1.0, raising=False)
+    pool_dir = tmp_path / "pool"
+    paths = _plates(pool_dir, 1)
+    hostile = pool_dir / f"stalls{HOSTILE_SUFFIX}"
+    hostile.write_bytes(b"x" * 64)
+    paths.append(hostile)
+    token = CancellationToken()
+    ran_out = threading.Event()
+    clock = {"out_of_time": ran_out.is_set} if how == "clock" else {}
+    results: list = []
+    with ReadPool(
+        _context(adapters=("hostile_hang", "generic")),
+        workers=1,
+        memory_bytes=GIB,
+        token=token,
+        **clock,  # type: ignore[arg-type]
+    ) as pool:
+        reader = threading.Thread(
+            target=lambda: results.extend(pool.read(iter(_tasks(paths, deadline=600.0)))),
+            daemon=True,
+        )
+        reader.start()
+        # The plate comes back first; the hostile file waited in the worker's pipe behind it.
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline and not results:
+            time.sleep(0.02)
+        assert len(results) == 1, "the plate was read"
+        time.sleep(0.3)  # the hostile file is now in hand, with ten minutes on its own clock
+        stopped_at = time.monotonic()
+        if how == "token":
+            token.stop("stopped by a person, keeping what was read")
+        else:
+            ran_out.set()
+        reader.join(30.0)
+        waited = time.monotonic() - stopped_at
+        assert not reader.is_alive(), "the stop waited on the file's own ten minutes"
+        assert pool.stopped == 1
+        assert pool.timeouts == 0 and pool.deaths == 0
+    assert waited < 20.0, f"the stop took {waited:.0f} s"
+    assert [result.task.sequence for result in results] == [0, 1]
+    kept, stopped = results
+    assert kept.killed_for is None and kept.outcome.outcome is ScanOutcome.EXTRACTED
+    assert stopped.killed_for == "stopped"
+    assert stopped.stage == "extract.hostile_hang"
+    assert stopped.outcome.outcome is ScanOutcome.DEFERRED
+    assert stopped.outcome.errors == [], "nothing is wrong with a file a stop interrupted"
+    assert any(stage == "stop" for stage, _ in stopped.outcome.warnings)
+    assert [note["event"] for note in pool.notes] == ["file.stopped"]
+    assert pool.notes[0]["entry_id"] == stopped.task.entry.entry_id
+    assert pool.notes[0]["in_stage"] == "extract.hostile_hang"
+    assert live_child_count() == 0
+
+
+def test_a_pass_whose_wall_clock_runs_out_does_not_wait_on_the_file_in_hand(
+    tmp_path, monkeypatch
+) -> None:
+    """Through the pass: the wall clock runs out with a file in hand whose own ceiling is ten
+    minutes away. The pass ends within the stop's grace and publishes. The file is counted as not
+    reached and left unexamined, with no error against it, and the journal says it was stopped."""
+    import threading
+
+    from ingence.core.project import Project
+    from ingence.core.settings import HashMode, HashSettings
+    from ingence.executors import pool as pool_module
+    from ingence.scan.census import run_census
+    from ingence.scan.deepen import run_deepen
+    from ingence.storage.catalog import open_catalog
+
+    monkeypatch.setattr(pool_module, "STOP_GRACE_SECONDS", 1.0, raising=False)
+    pool_dir = tmp_path / "pool"
+    _plates(pool_dir, 2)
+    (pool_dir / f"stalls{HOSTILE_SUFFIX}").write_bytes(b"x" * 64)
+    project = Project.create(
+        tmp_path / "project",
+        created_at="t",
+        roots=[pool_dir],
+        settings=Settings(
+            extraction=ExtractionSettings(
+                enabled=True, workers=1, adapters=("hostile_hang", "generic"), file_seconds=600.0
+            ),
+            hash=HashSettings(mode=HashMode.NONE),
+        ),
+    )
+    run_census(project, run_id="run_20260101T000001Z_111111111111", started_at="t")
+    reports: list = []
+    passing = threading.Thread(
+        target=lambda: reports.append(
+            run_deepen(
+                Project.open(project.path),
+                run_id="run_20260101T000002Z_222222222222",
+                started_at="t",
+                total_seconds=8.0,
+            )
+        ),
+        daemon=True,
+    )
+    started = time.monotonic()
+    passing.start()
+    passing.join(60.0)
+    took = time.monotonic() - started
+    assert not passing.is_alive(), "the pass waited on the file's own ten minutes"
+    assert took < 40.0, f"the pass took {took:.0f} s"
+    (report,) = reports
+    assert not report.cancelled and not report.stopped
+    assert report.budget is not None and report.budget.exhausted_by == "wall"
+    assert report.budget.unreached >= 1
+    with open_catalog(project.path) as catalog:
+        (hostile_id, outcome) = catalog.query(
+            "SELECT entry_id, scan_outcome FROM entries WHERE name = ?",
+            [f"stalls{HOSTILE_SUFFIX}"],
+        ).fetchone()
+        errors = catalog.query(
+            "SELECT count(*) FROM scan_errors WHERE entry_id = ?", [hostile_id]
+        ).fetchone()[0]
+        stopped = catalog.query(
+            "SELECT entry_id, detail FROM journal_events WHERE event = 'file.stopped'"
+        ).fetchall()
+    assert outcome == "metadata_only", "left unexamined, as a file the pass never reached"
+    assert errors == 0
+    assert hostile_id in {entry_id for entry_id, _ in stopped}
+    assert live_child_count() == 0
+
+
 def test_auto_starts_no_more_workers_than_the_files_warrant_and_a_number_stands() -> None:
     extraction = ExtractionSettings(workers="auto")
     assert worker_count(extraction, files=10) == 1

@@ -433,12 +433,122 @@ def _watch_own_memory(limit_bytes: int | None) -> None:
     watcher.start()
 
 
+#: The exit status a child uses when it ends itself because the process that started it is gone.
+#: Distinct from :data:`_MEMORY_EXIT` and from every signal-derived status. Usually nobody is left
+#: to read it. Where somebody is (a parent the watch took for gone and was not), the status says
+#: why the child ended.
+_ORPHAN_EXIT = 102
+
+#: How often the parent watch wakes when its parent has not gone. The sentinel it waits on is
+#: ready the moment the parent is gone, so this is not how fast the watch notices. It is how often
+#: the watch also reads the parent's process identifier on POSIX, a sign that does not depend on
+#: the sentinel. A quarter of a second costs nothing measurable and is well inside "promptly".
+_PARENT_POLL_SECONDS = 0.25
+
+#: ``PR_SET_PDEATHSIG`` from Linux's ``<linux/prctl.h>``.
+_PR_SET_PDEATHSIG = 1
+
+
+def _watch_parent(*, death_signal: bool = False) -> None:
+    """Have the child end itself as soon as the process that started it is gone.
+
+    A child exists to read a file for its parent, so a child whose parent is gone has nobody to
+    answer and must not go on. Without this watch it did go on. A read worker whose parent was
+    killed (a ``SIGKILL``, the machine's out-of-memory killer, a job's stop) kept reading for as
+    long as the file held it, at full speed, with the file open, adopted by the system's first
+    process. A worker between files learns of its parent's death from its pipe, which reports
+    end-of-file, but a worker inside a file never looks at its pipe.
+
+    The watch is a daemon thread that waits on the parent's sentinel, which ``multiprocessing``
+    gives every child it spawns: on POSIX the read end of a pipe whose other end only the parent
+    holds, and on Windows a handle on the parent process. Either is ready the moment the parent is
+    gone, however it went. On POSIX the thread also reads the parent's process identifier, which
+    changes to the adopting process's when the parent dies, as a second sign that needs nothing
+    from the sentinel. The child exits hard, as the memory watch does. Nobody is left to tell, and
+    nothing is worth unwinding.
+
+    The thread runs only when the interpreter lets it. A reader running Python code lets it within
+    milliseconds, and so does a reader blocked in a read or a sleep. A call into compiled code that
+    keeps the interpreter lock (a regular expression gone quadratic, for instance) keeps the thread
+    waiting until the call returns. For that case, ``death_signal`` asks Linux to send the child
+    ``SIGKILL`` when its parent goes (``PR_SET_PDEATHSIG``), which needs no thread and no lock.
+    Linux sends that signal when the *thread* that started the child ends, not the process, so a
+    parent asks for it only when it starts the child from its main thread, which lasts as long as
+    the process does. A worker started from any other thread would otherwise be killed when that
+    thread finished, mid-pass, and its file recorded as a memory death. macOS and Windows have no
+    such request. There, a job's worker is stopped together with everything it started
+    (:mod:`ingence.jobs.supervisor`), and a pass killed by other means relies on this thread.
+    """
+    parent = multiprocessing.parent_process()
+    if parent is None:
+        return  # not a child that ``multiprocessing`` started: there is no parent to watch
+    if death_signal:
+        _ask_for_death_signal()
+    # The identifier is read here and compared later, rather than compared with the identifier
+    # the parent recorded, so that a start method under which the parent is not the operating
+    # system's parent of the child is never taken for a dead parent.
+    expected = os.getppid() if os.name == "posix" else None
+
+    def gone() -> bool:
+        if expected is not None and os.getppid() != expected:
+            return True
+        try:
+            return not parent.is_alive()
+        except (OSError, ValueError):
+            return False
+
+    # A parent that went before the death signal was asked for sends none, and one that went
+    # before the thread below starts is gone already. Its sentinel is ready either way, so one
+    # look now settles both.
+    if gone():
+        os._exit(_ORPHAN_EXIT)
+
+    def watch() -> None:
+        while not gone():
+            try:
+                parent.join(_PARENT_POLL_SECONDS)
+            except (OSError, ValueError):
+                time.sleep(_PARENT_POLL_SECONDS)
+        os._exit(_ORPHAN_EXIT)
+
+    watcher = threading.Thread(target=watch, name="ingence-parent-watch", daemon=True)
+    watcher.start()
+
+
+def _ask_for_death_signal() -> bool:
+    """Ask Linux to send this process ``SIGKILL`` when the thread that started it ends.
+
+    Returns whether the kernel took the request. Linux only: elsewhere there is no such request,
+    and the answer is False, which leaves the parent watch's thread as the only layer in the child.
+    """
+    if sys.platform.startswith("linux"):  # pragma: no cover - Linux
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            answer = libc.prctl(
+                _PR_SET_PDEATHSIG,
+                ctypes.c_ulong(int(signal.SIGKILL)),
+                ctypes.c_ulong(0),
+                ctypes.c_ulong(0),
+                ctypes.c_ulong(0),
+            )
+        except (OSError, AttributeError, ValueError):
+            return False
+        return bool(answer == 0)
+    return False
+
+
+def _started_from_the_main_thread() -> bool:
+    """Whether the calling thread is the main thread, the one a death signal may be tied to."""
+    return threading.current_thread() is threading.main_thread()
+
+
 def _child_main(
     connection: Connection,
     name: str,
     module: str | None,
     context: ExtractionContext,
     memory_bytes: int | None,
+    death_signal: bool = False,
 ) -> None:
     """Run one extractor and send back its result. The whole of the child.
 
@@ -452,7 +562,11 @@ def _child_main(
     builtins and then the module that declared this extractor. That second import is what lets an
     extractor living outside the package be isolated at all, and it costs nothing when the extractor
     is a builtin, because the module is already in ``sys.modules``.
+
+    The wall clock lives in the parent, so a child whose parent is gone would have no clock at all.
+    The child watches its parent and ends itself when the parent goes (:func:`_watch_parent`).
     """
+    _watch_parent(death_signal=death_signal)
     _apply_memory_limit(memory_bytes)
     _watch_own_memory(memory_bytes)
     try:
@@ -525,7 +639,14 @@ class Supervisor:
         receiver, sender = spawn.Pipe(duplex=False)
         process = spawn.Process(
             target=_child_main,
-            args=(sender, name, _module_of(name), context, self.memory_bytes),
+            args=(
+                sender,
+                name,
+                _module_of(name),
+                context,
+                self.memory_bytes,
+                _started_from_the_main_thread(),
+            ),
             daemon=True,
         )
         timed_out = threading.Event()

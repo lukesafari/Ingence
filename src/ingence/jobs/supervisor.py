@@ -13,13 +13,21 @@ beside the ledger (``jobs/logs/<job>-<attempt>.log``). The start and the stop di
 
 - POSIX (macOS, Linux): ``start_new_session=True``. The worker has its own session, so the
   Ctrl-C that closes ``ingence see`` in a terminal does not reach it. The server's close stops it
-  on purpose. The supervisor stops it with the subprocess object's ``kill()``, which is
-  ``SIGKILL``.
+  on purpose. The worker leads its own process group, and what it starts is in that group unless
+  it starts a session of its own: its read workers, their extraction children, and any program a
+  reader runs. The supervisor stops the worker with ``SIGKILL`` to the whole group
+  (``os.killpg``, :func:`kill_worker`), so nothing it started is left running.
 - Windows: ``CREATE_NEW_PROCESS_GROUP``, which keeps a console's Ctrl-C from the worker in the
-  same way. The supervisor stops it with the subprocess object's ``kill()``, which is
-  ``TerminateProcess``. Windows has no process-group kill of the POSIX kind, and none is needed,
-  because the worker starts no children that outlive it (its extraction subprocesses are
-  supervised and die with it).
+  same way. Windows has no process-group kill of the POSIX kind. The supervisor stops the
+  worker's tree with the system's ``taskkill /T /F``, and then the worker itself with the
+  subprocess object's ``kill()``, which is ``TerminateProcess``.
+
+A worker does start children, and a kill of the worker alone did not stop them. Its read workers
+read files in processes of their own, and one busy inside a file never looked at the pipe that
+would have told it its parent was gone: it went on reading, at full speed, adopted by the system.
+So the stop takes the group or the tree. Each read worker also watches its parent and ends itself
+when the parent is gone, on every platform (:func:`ingence.executors.supervisor._watch_parent`),
+which covers a worker killed by anything other than this supervisor.
 
 The supervisor draws its conclusions about a worker it started from the subprocess's exit and
 from its heartbeat. A worker not heard from for ``jobs.silent_seconds`` of the supervisor's own
@@ -82,6 +90,7 @@ __all__ = [
     "JobSupervisor",
     "command_line",
     "ended_how",
+    "kill_worker",
     "prune_logs",
     "runs_worker",
     "spawn_worker",
@@ -129,6 +138,48 @@ STOP_GRACE_DEFAULT_SECONDS = 10.0
 def stop_grace(phase: str | None) -> float:
     """Seconds a worker in ``phase`` has to stop itself before it is stopped."""
     return STOP_GRACE_SECONDS.get(phase or "", STOP_GRACE_DEFAULT_SECONDS)
+
+
+#: How long the system's ``taskkill`` is given to stop a worker's tree on Windows before the
+#: supervisor goes on to kill the worker itself. It answers in well under a second; the bound is
+#: so that a system that does not answer cannot hold the supervisor.
+TASKKILL_SECONDS = 30.0
+
+
+def kill_worker(process: subprocess.Popen[bytes]) -> None:
+    """Stop a worker this supervisor started, together with every process it started.
+
+    On POSIX the worker leads a process group of its own (``spawn_worker`` starts it in a new
+    session), and ``SIGKILL`` goes to the whole group. The group is named by the worker's process
+    identifier, which cannot have been reused, since the worker has not been reaped: the
+    supervisor calls this only while ``wait`` says the worker still runs. On Windows the system's
+    ``taskkill /T /F`` stops the tree the worker's process identifier roots. On both, the
+    subprocess object's own ``kill()`` follows, so the worker itself is stopped even where the
+    group or the tree could not be reached.
+    """
+    if sys.platform == "win32":  # pragma: no cover - Windows
+        _kill_tree_on_windows(process.pid)
+    else:
+        with contextlib.suppress(OSError):  # gone already, or not a group of its own
+            os.killpg(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+    with contextlib.suppress(OSError):
+        process.kill()
+
+
+def _kill_tree_on_windows(pid: int) -> None:  # pragma: no cover - Windows
+    """``taskkill /T /F`` on one process's tree, from the system's own folder, never the PATH."""
+    # Windows reads its environment without regard to case.
+    root = os.environ.get("SYSTEMROOT") or os.environ.get("WINDIR") or r"C:\Windows"
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(  # noqa: S603 - the system's taskkill, a number as its argument
+            [str(Path(root) / "System32" / "taskkill.exe"), "/T", "/F", "/PID", str(int(pid))],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=TASKKILL_SECONDS,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
 
 
 def prune_logs(project: Path, *, keep: int) -> list[Path]:
@@ -191,7 +242,8 @@ def spawn_worker(
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / f"{job.job_id}-{job.attempts}.log"
     # Its own process group (Windows) or session (POSIX), so a console's Ctrl-C meant for the
-    # server does not reach the worker. The server stops it on purpose when it closes.
+    # server does not reach the worker. The server stops it on purpose when it closes. On POSIX
+    # the session's group is also what ``kill_worker`` stops, the worker with all it started.
     # On Windows it is also detached from the console: a new process group keeps
     # Ctrl-C away, but closing the console window reaches every process attached to it, and the
     # worker's output goes to its log file anyway.
@@ -685,8 +737,19 @@ class JobSupervisor:
                 )
             )
             return False
-        # SIGKILL on POSIX. On Windows ``os.kill`` with any other signal is TerminateProcess.
-        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        # SIGKILL on POSIX, to the worker's whole process group where it leads one, as every
+        # worker ``spawn_worker`` started does, so that its read workers go with it. On Windows
+        # ``os.kill`` with any other signal is TerminateProcess (not reached: no command line is
+        # read there).
+        kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+        try:
+            leads_a_group = hasattr(os, "killpg") and os.getpgid(pid) == pid
+        except OSError:
+            leads_a_group = False
+        if leads_a_group:
+            os.killpg(pid, kill)
+        else:
+            os.kill(pid, kill)
         deadline = time.monotonic() + 60
         while worker_alive(self.project) and time.monotonic() < deadline:
             time.sleep(POLL_SECONDS)
@@ -718,7 +781,7 @@ class JobSupervisor:
                     break
                 except subprocess.TimeoutExpired:
                     if self._stopped.is_set():
-                        process.kill()
+                        kill_worker(process)
                         code = process.wait(timeout=60)
                         self._settle(job, code, closing=True)
                         return
@@ -741,7 +804,7 @@ class JobSupervisor:
                     if stop_asked_at is not None:
                         phase = (self.ledger.get(job.job_id) or job).phase
                         if looked - stop_asked_at > stop_grace(phase):
-                            process.kill()
+                            kill_worker(process)
                             process.wait(timeout=60)
                             self._settle(
                                 job,
@@ -762,7 +825,7 @@ class JobSupervisor:
                         and self.stop_silent
                         and silent > self.stop_silent_seconds
                     ):
-                        process.kill()
+                        kill_worker(process)
                         process.wait(timeout=60)
                         self._settle(
                             job,

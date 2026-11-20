@@ -30,8 +30,10 @@ project valid. Cancellation is therefore safe at any moment, which is why the
 engine offers it.
 
 A stopped run keeps what it has. A token asked to :meth:`stop` says stop and
-keep. A content pass finishes the file in hand, counts the rest as not reached
-and publishes as an exhausted budget does: a complete snapshot with honest gaps.
+keep. A content pass gives the files in hand a short grace to finish
+(``executors.pool.STOP_GRACE_SECONDS``), counts the rest, and any file the grace
+ended, as not reached, and publishes as an exhausted budget does: a complete
+snapshot with honest gaps.
 The census and inference are atomic, so for them a stop is a discard. A stop can
 be escalated to a discard by :meth:`cancel`, and never the other way. On a
 terminal the first Ctrl-C stops, the second discards, and the third exits.
@@ -101,11 +103,14 @@ class CancellationToken:
     def stop(self, reason: str = "stopped") -> None:
         """Request that work stop and keep what it has.
 
-        A content pass finishes the file in hand within its own ceiling, counts the rest as
-        not reached and publishes, as an exhausted budget does. Nothing is killed, because
-        a killed reading would be recorded as a content error against a file that was only
-        interrupted. A token already cancelled is left as it is. A stop never softens a
-        discard, and a second stop changes nothing.
+        A content pass gives the files in hand the read pool's stop grace to finish, within
+        their own ceilings, counts the rest as not reached and publishes, as an exhausted
+        budget does. Nothing is killed here. A file's ceiling grows with its size, so a pass
+        that waited for every file in hand could wait for hours. A file still in hand when the
+        grace ends has its worker killed by the pool and is counted as not reached, never
+        recorded as a content error, because it was only interrupted. A token already
+        cancelled is left as it is. A stop never softens a discard, and a second stop changes
+        nothing.
         """
         with self._lock:
             if self._event.is_set():

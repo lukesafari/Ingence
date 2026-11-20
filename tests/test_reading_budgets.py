@@ -10,10 +10,18 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
+
 from ingence.core.project import Project
 from ingence.core.schema import Entry, EntryType, ScanOutcome
 from ingence.core.settings import ExtractionSettings, Settings
-from ingence.extractors.limits import ceiling_for, file_ceiling_for
+from ingence.extractors.limits import (
+    LONGEST_CEILING_SECONDS,
+    Limits,
+    ceiling_for,
+    charged_bytes,
+    file_ceiling_for,
+)
 from ingence.scan.census import run_census
 from ingence.scan.deepen import FILE_CLOCK_OPERATION, Budget, deepen_entry, run_deepen
 from ingence.scan.profiles import PROFILES, ProfileName, apply_profile
@@ -48,6 +56,69 @@ def test_the_file_ceiling_keeps_the_allowance_per_gigabyte() -> None:
     assert file_ceiling_for(1 << 30, settings) == 150.0
     # The child's own ceiling is separate from the file ceiling.
     assert ceiling_for(1 << 30, settings) == 180.0
+
+
+def test_the_allowance_is_for_the_bytes_stored_and_no_size_earns_more_than_four_hours() -> None:
+    """A size is what a file claims. A sparse file of four kilobytes claiming a pebibyte earned
+    about four years at the default rate, so a reader stuck on it was never killed. The allowance
+    is for the bytes the file stores, and no size takes a ceiling past four hours."""
+    settings = ExtractionSettings(
+        file_seconds=60.0,
+        subprocess_timeout_seconds=60.0,
+        subprocess_timeout_per_gigabyte_seconds=120.0,
+    )
+    pebibyte = 1 << 50
+    assert file_ceiling_for(pebibyte, settings, stored_bytes=4096) < 60.001
+    assert ceiling_for(pebibyte, settings, stored_bytes=4096) < 60.001
+    # An ordinary file stores its size, give or take a block: nothing changes for it.
+    assert file_ceiling_for(1 << 30, settings, stored_bytes=(1 << 30) + 4096) == 180.0
+    assert charged_bytes(1 << 30, (1 << 30) + 4096) == 1 << 30
+    # Where nothing says what is stored (Windows) the size stands, and the cap bounds it.
+    assert LONGEST_CEILING_SECONDS == 4 * 3600.0
+    assert file_ceiling_for(pebibyte, settings) == LONGEST_CEILING_SECONDS
+    assert ceiling_for(pebibyte, settings) == LONGEST_CEILING_SECONDS
+    assert Limits.from_settings(settings, size_bytes=pebibyte).timeout_seconds == (
+        LONGEST_CEILING_SECONDS
+    )
+    # Below the cap the rate is what it was.
+    assert file_ceiling_for(10 << 30, settings) == 60.0 + 1200.0
+    # A base a person set above the cap stands: the cap bounds what a size adds.
+    patient = ExtractionSettings(file_seconds=8 * 3600.0)
+    assert file_ceiling_for(pebibyte, patient) == 8 * 3600.0
+
+
+def test_a_sparse_file_is_given_the_time_its_stored_bytes_earn(tmp_path) -> None:
+    """Through the reading itself: the file's own clock, which the parent's deadline shares, is
+    scaled by the bytes the census measured as stored (``allocated_bytes``), so a sparse file
+    claiming gigabytes is refused at its ordinary ceiling."""
+    pool = tmp_path / "pool"
+    pool.mkdir()
+    sparse = pool / "frames_sparse.csv"
+    with sparse.open("wb") as handle:
+        handle.write(b"frame,value\n1,2\n")
+        handle.truncate(8 << 30)
+    stat = sparse.stat()
+    blocks = getattr(stat, "st_blocks", None)
+    if blocks is None or blocks * 512 >= stat.st_size:
+        pytest.skip("this filesystem keeps no sparse files")
+    entry = Entry(
+        entry_id="entry_frames_sparse",
+        root_id="root_x",
+        relative_path=sparse.name,
+        name=sparse.name,
+        entry_type=EntryType.FILE,
+        extension="csv",
+        size_bytes=stat.st_size,
+        allocated_bytes=blocks * 512,
+        first_seen_run="run_1",
+        last_seen_run="run_1",
+    )
+    # A base of a microsecond, the default rate: eight claimed gigabytes would add 960 s.
+    hurried = Settings(extraction=ExtractionSettings(enabled=True, file_seconds=1e-6))
+    read = deepen_entry(entry, sparse, run_id="r", observed_at="t", settings=hurried)
+    clocks = [error for error in read.errors if error.operation == FILE_CLOCK_OPERATION]
+    assert len(clocks) == 1, "the sparse file was given its claimed size's allowance"
+    assert "ceiling of 0.0 s" in clocks[0].message, clocks[0].message
 
 
 def test_a_file_whose_clock_runs_out_is_a_content_error_for_that_file_alone(tmp_path) -> None:

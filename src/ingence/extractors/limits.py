@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BYTES_PER_GIGABYTE",
+    "LONGEST_CEILING_SECONDS",
     "CountingReader",
     "ExpansionBudget",
     "LimitExceededError",
@@ -59,6 +60,7 @@ __all__ = [
     "StructureBoundsError",
     "UnsafeMemberPathError",
     "ceiling_for",
+    "charged_bytes",
     "file_ceiling_for",
     "safe_member_path",
 ]
@@ -148,8 +150,52 @@ class Limits:
 #: path does not import ``core.settings``.
 BYTES_PER_GIGABYTE = 1 << 30
 
+#: The longest wall-clock ceiling that a file's size can earn it, in seconds: four hours.
+#:
+#: The allowance per gigabyte has no end of its own, and a size is only what a file claims. A
+#: sparse file of four kilobytes can claim a pebibyte, which at the default rate earned it about
+#: four years, so a reader stuck on it was in effect never killed. Charging the bytes actually
+#: stored (:func:`charged_bytes`) closes that where the platform reports them. This cap closes it
+#: everywhere else, and bounds a member of a container, whose size is the container's word.
+#:
+#: Four hours is a reason and not a measurement. At the default rate it is the allowance of a
+#: file of about 120 GB stored, and a gigabit link (about 110 MB/s) carries well over a terabyte
+#: in that time, so an honest reading of a real file does not reach it. It is also the deep
+#: depth's ceiling on a whole pass (``total_seconds``), so no file's size earns it more than the
+#: deepest depth gives all the files together. A base a person set above it stands, because the
+#: cap bounds what a size adds and never cuts a number a person wrote.
+LONGEST_CEILING_SECONDS = 4 * 3600.0
 
-def ceiling_for(size_bytes: int | None, settings: ExtractionSettings) -> float:
+
+def charged_bytes(size_bytes: int | None, stored_bytes: int | None = None) -> int:
+    """Return the bytes a file's ceiling is scaled by: what it stores, never more than its size.
+
+    ``stored_bytes`` is the space the file takes on its disk, ``st_blocks * 512`` where the
+    platform reports blocks (POSIX), and None where it does not (Windows), which leaves the
+    logical size. The two agree for an ordinary file, give or take one block, so taking the
+    smaller changes nothing for it. A sparse file stores only what was written to it, and its
+    reading is charged for that and not for the size it claims. Two kinds of honest file are
+    charged less than their size too, and this is a stated trade. A file on a compressing
+    filesystem is charged for its compressed bytes. A file that a cloud service keeps online only
+    stores nothing on the disk, and reading it fetches it. Either can take longer to read whole
+    than its stored bytes earn, and is then killed at the ceiling as any other slow reading is,
+    recorded as a content error that the next pass retries.
+    """
+    size = max(size_bytes or 0, 0)
+    if stored_bytes is None:
+        return size
+    return min(size, max(stored_bytes, 0))
+
+
+def _scaled(base: float, rate: float, charged: int) -> float:
+    """A base plus a rate per gigabyte charged, the sum never past the longest ceiling."""
+    total = base + rate * (charged / BYTES_PER_GIGABYTE)
+    return min(total, max(base, LONGEST_CEILING_SECONDS))
+
+
+def ceiling_for(
+    size_bytes: int | None, settings: ExtractionSettings, *, stored_bytes: int | None = None
+) -> float:
     """Return the wall-clock ceiling for one file's supervised reading, in seconds.
 
     A base plus a rate per gigabyte. A flat ceiling makes being large
@@ -160,24 +206,35 @@ def ceiling_for(size_bytes: int | None, settings: ExtractionSettings) -> float:
     meaning what it says.
 
     Unknown or zero size gets the base, which is the honest floor: nothing is known that
-    would justify more.
+    would justify more. The gigabytes are the bytes the file stores (:func:`charged_bytes`),
+    and the size never takes the ceiling past :data:`LONGEST_CEILING_SECONDS`.
     """
-    gigabytes = max(size_bytes or 0, 0) / BYTES_PER_GIGABYTE
-    return settings.subprocess_timeout_seconds + (
-        settings.subprocess_timeout_per_gigabyte_seconds * gigabytes
+    return _scaled(
+        settings.subprocess_timeout_seconds,
+        settings.subprocess_timeout_per_gigabyte_seconds,
+        charged_bytes(size_bytes, stored_bytes),
     )
 
 
-def file_ceiling_for(size_bytes: int | None, settings: ExtractionSettings) -> float:
+def file_ceiling_for(
+    size_bytes: int | None, settings: ExtractionSettings, *, stored_bytes: int | None = None
+) -> float:
     """Return the wall-clock ceiling for one file's whole reading, in seconds.
 
     ``file_seconds`` plus the same allowance per gigabyte :func:`ceiling_for` grants a
     supervised child, so a large file is given the time its size earns in every stage and not
     only in the child. Detection, identity, every reader and the members of a container share
     it. A file that reaches it is a content error for that file alone, and the pass goes on.
+
+    The allowance is for the bytes the file stores (:func:`charged_bytes`), and the size never
+    takes the ceiling past :data:`LONGEST_CEILING_SECONDS`, so no file's claim about itself can
+    keep its reader from being killed.
     """
-    gigabytes = max(size_bytes or 0, 0) / BYTES_PER_GIGABYTE
-    return settings.file_seconds + (settings.subprocess_timeout_per_gigabyte_seconds * gigabytes)
+    return _scaled(
+        settings.file_seconds,
+        settings.subprocess_timeout_per_gigabyte_seconds,
+        charged_bytes(size_bytes, stored_bytes),
+    )
 
 
 @dataclass

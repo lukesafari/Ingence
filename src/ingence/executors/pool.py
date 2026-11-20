@@ -27,8 +27,13 @@ than twice the mean of the first thirty-two, re-based after each step, never bel
 back up. The rule is simple, stated and measurable.
 
 Cancellation reaches every worker through the supervisor's live registry, so a token's discard
-kills them all at once. A stop lets the files in hand finish within their deadlines and hands out
-nothing more.
+kills them all at once. A stop hands out nothing more and gives the files in hand
+:data:`STOP_GRACE_SECONDS` to finish, within their own deadlines. A worker still holding a file
+after that is killed, and each file it held is recorded as stopped: not reached, with nothing
+written against it. The same holds when the caller's own clock runs out (the pass's budget). A
+file's deadline grows with its size, so without the grace a stop would wait for as long as the
+largest file in hand had earned, which is hours for a real one. A worker whose parent is gone
+ends itself, inside a file or not (:func:`~ingence.executors.supervisor._watch_parent`).
 """
 
 from __future__ import annotations
@@ -54,7 +59,9 @@ from ingence.executors.supervisor import (
     _kill,
     _module_of,
     _resident_bytes,
+    _started_from_the_main_thread,
     _watch_own_memory,
+    _watch_parent,
 )
 from ingence.extractors.base import EXTRACTORS
 
@@ -108,6 +115,14 @@ QUEUE_DEPTH = 2
 #: check and the pipe between the two (milliseconds), and short enough that a hung stage costs the
 #: pass no more than its ceiling and a breath. This is a reason and not a measurement.
 KILL_GRACE_SECONDS = 2.0
+
+#: Seconds the files in hand at a stop are given to finish before their workers are killed and
+#: the files recorded as stopped. Each file's own deadline still holds within it. Half a minute is
+#: far longer than an ordinary file takes (the sample collection was read at 30 to 45 files a
+#: second), so a stop keeps every ordinary file that was in hand. It is short enough that a person
+#: who asked to stop, or a pass whose budget ran out, does not wait on the allowance a large file's
+#: size earned, which reaches hours. This is a reason and not a measurement.
+STOP_GRACE_SECONDS = 30.0
 
 #: Seconds a freshly spawned worker is given to load the readers and say it is ready. On a
 #: development machine a worker is ready in 1.2 s unloaded (the import of the pass and the
@@ -193,7 +208,8 @@ class ReadResult:
     #: Which worker read it (its number in this pool), or None for the serial reader.
     worker: int | None = None
     #: Why the worker was killed or died with this file in hand, or None where it finished:
-    #: ``timeout``, ``memory``, ``crash``.
+    #: ``timeout``, ``memory``, ``crash``, or ``stopped`` where a stop's grace ended first (the
+    #: file was only interrupted, and its outcome says it was not reached).
     killed_for: str | None = None
     #: The stage the worker had reported last where it was killed or died.
     stage: str | None = None
@@ -290,8 +306,18 @@ def _warm_readers() -> None:
                 registry.get(name)
 
 
-def _worker_main(connection: Connection, context: ReadContext, memory_bytes: int | None) -> None:
+def _worker_main(
+    connection: Connection,
+    context: ReadContext,
+    memory_bytes: int | None,
+    death_signal: bool = False,
+) -> None:
     """Load the readers once, then read every file the parent sends until it says stop.
+
+    A worker ends when its pipe reports end-of-file, which it sees only between files. So it also
+    watches its parent from the start, and ends itself the moment the parent is gone, in a file or
+    not (:func:`~ingence.executors.supervisor._watch_parent`). ``death_signal`` says the parent
+    started it from its main thread, so that Linux may be asked to kill it with its parent.
 
     There are two memory layers, as in the supervisor. The self-watch on resident size starts
     first and runs everywhere. The kernel's address-space limit is asked for once the readers are
@@ -309,6 +335,9 @@ def _worker_main(connection: Connection, context: ReadContext, memory_bytes: int
     with contextlib.suppress(OSError, ValueError, AttributeError):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    # Before the readers are loaded, which takes a second or more: a parent killed meanwhile
+    # leaves nobody to read for.
+    _watch_parent(death_signal=death_signal)
     _watch_own_memory(memory_bytes)
     try:
         import importlib
@@ -423,6 +452,8 @@ class ReadPool:
         token: object = None,
         recycle_after: int = RECYCLE_AFTER_TASKS,
         queue_depth: int = QUEUE_DEPTH,
+        out_of_time: Callable[[], bool] | None = None,
+        stop_grace_seconds: float | None = None,
     ) -> None:
         self._context = context
         self._size = max(1, workers)
@@ -430,6 +461,13 @@ class ReadPool:
         self._token = token
         self._recycle_after = recycle_after
         self._queue_depth = max(1, queue_depth)
+        #: Whether the caller's own clock has run out (the pass's budget), read beside the token.
+        #: Once it says so, the pool stops as it does for the token's stop.
+        self._out_of_time = out_of_time
+        #: Read when the pool is made and not when the module is, so that a test shortening the
+        #: module's number reaches the pool a pass makes for itself.
+        grace = STOP_GRACE_SECONDS if stop_grace_seconds is None else stop_grace_seconds
+        self._stop_grace = max(0.0, grace)
         self._workers: dict[int, _Worker] = {}
         self._retired: list[_Worker] = []
         self._next_number = 0
@@ -442,6 +480,8 @@ class ReadPool:
         self.deaths = 0
         self.memory_deaths = 0
         self.recycled = 0
+        #: Files a stop's grace ended in hand, each recorded as stopped.
+        self.stopped = 0
         self._startup_failures = 0
         #: Why the pool stopped spawning workers and asked the pass to stop, if it did.
         self.fallen_back: str | None = None
@@ -468,7 +508,7 @@ class ReadPool:
         parent_end, child_end = spawn.Pipe(duplex=True)
         process = spawn.Process(
             target=_worker_main,
-            args=(child_end, self._context, self._memory_bytes),
+            args=(child_end, self._context, self._memory_bytes, _started_from_the_main_thread()),
             daemon=True,
         )
         process.start()
@@ -523,6 +563,12 @@ class ReadPool:
             return None
         return "stop" if getattr(token, "keeps", False) else "discard"
 
+    def _stopping(self) -> bool:
+        """Whether to stop and keep: the token asked it, or the caller's own clock ran out."""
+        if self._asked() == "stop":
+            return True
+        return self._out_of_time is not None and bool(self._out_of_time())
+
     # -- reading ----------------------------------------------------------------------------
 
     def read(self, tasks: Iterable[ReadTask]) -> Iterator[ReadResult]:
@@ -530,6 +576,9 @@ class ReadPool:
 
         The generator pulls a task from ``tasks`` only when a worker has room for it, so a
         caller's generator can count what it never handed out (a budget that ran out, a stop).
+
+        A stop, from the token or the caller's clock, gives the files in hand the stop's grace
+        from the moment it is first seen, and then stops them (:meth:`_end_the_stop`).
         """
         pending = iter(tasks)
         requeue: deque[ReadTask] = deque()
@@ -537,14 +586,19 @@ class ReadPool:
         order: deque[int] = deque()
         flights: dict[int, _Flight] = {}
         done: dict[int, ReadResult] = {}
-        self._fill()
+        #: When the stop was first seen, on the monotonic clock; its grace runs from here.
+        stopped_at: float | None = time.monotonic() if self._stopping() else None
+        if stopped_at is None:
+            self._fill()
 
         while True:
             halted = self._asked()
             if halted == "discard":
                 self._abandon()
                 return
-            if halted == "stop" and not exhausted:
+            if stopped_at is None and self._stopping():
+                stopped_at = time.monotonic()
+            if stopped_at is not None and not exhausted:
                 # Nothing more is handed out. The caller's generator is run to its end so that it
                 # can count what it never handed out, and anything it still yields is dropped.
                 exhausted = True
@@ -602,8 +656,10 @@ class ReadPool:
                 deque(pending, maxlen=0)
                 return
 
-            # Wait for a worker to speak, a worker to die, or a deadline.
+            # Wait for a worker to speak, a worker to die, a deadline, or the end of a stop's grace.
             timeout = self._next_timeout(flights)
+            if stopped_at is not None:
+                timeout = min(timeout, max(0.0, stopped_at + self._stop_grace - time.monotonic()))
             handles: list[Any] = []
             for worker in self._workers.values():
                 handles.append(worker.connection)
@@ -616,8 +672,11 @@ class ReadPool:
             for worker in list(self._workers.values()):
                 self._receive(worker, flights, done)
             self._reap(flights, done, requeue)
+            if stopped_at is not None and time.monotonic() >= stopped_at + self._stop_grace:
+                self._end_the_stop(flights, done, requeue)
             self._reap_retired(wait_seconds=0.0)
-            if self._asked() != "discard":
+            # After a stop a worker is started only for a file that waits to be handed out again.
+            if self._asked() != "discard" and (stopped_at is None or requeue):
                 self._fill()
 
     def _abandon(self) -> None:
@@ -625,6 +684,52 @@ class ReadPool:
         for worker in list(self._workers.values()):
             self._retire(worker, kill=True)
         self._reap_retired(wait_seconds=_REAP_SECONDS)
+
+    def _end_the_stop(
+        self, flights: dict[int, _Flight], done: dict[int, ReadResult], requeue: deque[ReadTask]
+    ) -> None:
+        """The stop's grace is over: kill every worker still holding a file, and stop each file.
+
+        Every file still handed out is stopped: the one a worker is reading, the one waiting in
+        its pipe behind it, and one waiting to be handed out again after its worker died, since
+        nothing more is read. Each is recorded as stopped (:func:`_stopped_result`), never as a
+        content error, because the file was only interrupted.
+        """
+        now = time.monotonic()
+        held_by: dict[int, list[_Flight]] = {}
+        for flight in flights.values():
+            held_by.setdefault(flight.worker, []).append(flight)
+        flights.clear()
+        for number, held in sorted(held_by.items()):
+            worker = self._workers.get(number)
+            if worker is not None:
+                worker.queue.clear()
+                self._retire(worker, kill=True)
+            for flight in sorted(held, key=lambda one: one.task.sequence):
+                stage = flight.stage if flight.started is not None else None
+                seconds = now - flight.started if flight.started is not None else 0.0
+                self._stop_one(flight.task, number, stage, seconds, done)
+        while requeue:
+            self._stop_one(requeue.popleft(), None, None, 0.0, done)
+
+    def _stop_one(
+        self,
+        task: ReadTask,
+        worker: int | None,
+        stage: str | None,
+        seconds: float,
+        done: dict[int, ReadResult],
+    ) -> None:
+        done[task.sequence] = _stopped_result(task, worker, stage, seconds)
+        self.stopped += 1
+        self.notes.append(
+            {
+                "event": "file.stopped",
+                "worker": worker,
+                "entry_id": task.entry.entry_id,
+                "in_stage": stage,
+            }
+        )
 
     def _dispatch(self, worker: _Worker, task: ReadTask, flights: dict[int, _Flight]) -> bool:
         try:
@@ -926,6 +1031,39 @@ def _killed_result(
     )
 
 
+def _stopped_result(
+    task: ReadTask, worker: int | None, stage: str | None, seconds: float
+) -> ReadResult:
+    """The record of a file a stop's grace ended in hand: not reached, nothing against the file.
+
+    The file was only interrupted. A content error says that the work was attempted and that
+    something is wrong with the file or a reader, and nothing here shows either. So the outcome is
+    ``DEFERRED`` and no error is written. The pass counts the file as not reached, as it counts the
+    files the stop never handed out, so an earlier run's reading of it stands and the next pass
+    reads it again. The warning says how far the reading got.
+    """
+    from ingence.core.schema import ScanOutcome
+    from ingence.scan.deepen import DeepenOutcome
+
+    outcome = DeepenOutcome(
+        entry_id=task.entry.entry_id,
+        outcome=ScanOutcome.DEFERRED,
+        seconds=seconds,
+        nanoseconds=int(seconds * 1e9),
+    )
+    where = f"in stage {stage}" if stage else "before its reading started"
+    outcome.warnings.append(
+        (
+            "stop",
+            f"the pass stopped with the file in hand ({where}); its worker was killed when the "
+            "stop's grace ended, and the file is left for the next pass",
+        )
+    )
+    return ReadResult(
+        task, outcome, worker=worker, killed_for="stopped", stage=stage, seconds=seconds
+    )
+
+
 class SerialReader:
     """Reads in this process, one file at a time: the path kept to measure the pool against.
 
@@ -934,7 +1072,7 @@ class SerialReader:
     what the boundary costs. Here ``file_seconds`` is a refusal between stages and not an
     interruption. The file's clock is read before each stage and a stage is refused once it has
     run out, but a stage that has started runs to its end, however long. Only a worker's deadline
-    interrupts.
+    interrupts, and so a stop here waits for the file in hand, however long it takes.
     """
 
     size = 1
@@ -942,6 +1080,7 @@ class SerialReader:
     timeouts = 0
     deaths = 0
     recycled = 0
+    stopped = 0
 
     def __init__(
         self, context: ReadContext, read: Callable[..., DeepenOutcome] | None = None

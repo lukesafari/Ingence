@@ -1305,6 +1305,20 @@ def deepen_entry(
     return result
 
 
+def _file_ceiling(entry: Entry, settings: Settings) -> float:
+    """One file's whole ceiling, the same for the worker's own clock and the parent's kill.
+
+    The allowance per gigabyte is for the bytes the file stores, as the census measured them
+    (``allocated_bytes``, from ``st_blocks`` where the platform reports blocks), and not for the
+    size it claims, so a sparse file claiming a pebibyte gets an ordinary file's minute. Where the
+    stored bytes are unknown the size stands, and the ceiling's own cap bounds it
+    (:data:`~ingence.extractors.limits.LONGEST_CEILING_SECONDS`).
+    """
+    return file_ceiling_for(
+        entry.size_bytes, settings.extraction, stored_bytes=entry.allocated_bytes
+    )
+
+
 #: The operation a reading the file's own clock stopped is recorded under.
 FILE_CLOCK_OPERATION = "file_seconds"
 
@@ -1469,7 +1483,7 @@ def _read_entry(
     # members. Between stages the clock is read and a stage is refused once it has run out. A
     # supervised child is given no more than what is left of it, and a pool's worker is killed
     # at it.
-    file_ceiling = file_ceiling_for(entry.size_bytes, settings.extraction)
+    file_ceiling = _file_ceiling(entry, settings)
     deadline_ns = started + int(file_ceiling * 1e9)
     clock_ran_out = False
 
@@ -2913,9 +2927,10 @@ def run_deepen(
     cancelled = False
 
     # Stop and keep, or discard. A token asked to stop and keep
-    # ends the pass the way an exhausted budget does: the file in hand finishes, every file after
-    # it is counted as not reached, and the run is published with honest gaps. A token asked to
-    # discard ends it the way it always has: nothing is published.
+    # ends the pass the way an exhausted budget does: the files in hand are given the pool's stop
+    # grace to finish (``executors.pool.STOP_GRACE_SECONDS``), a file still in hand after it is
+    # counted as not reached with every file after it, and the run is published with honest gaps.
+    # A token asked to discard ends it the way it always has: nothing is published.
     def asked() -> str | None:
         """``stop``, ``discard`` or None, reading the token once per checkpoint."""
         if token is None or not token.cancelled:
@@ -3144,6 +3159,9 @@ def run_deepen(
             ),
             memory_bytes=settings.extraction.subprocess_memory_bytes,
             token=token,
+            # A budget that runs out stops the files in hand as a stop does: they are given the
+            # stop's grace and no longer, whatever their own ceilings.
+            out_of_time=lambda: budget.exhausted,
         )
         if settings.extraction.use_subprocess_isolation
         else SerialReader(context)
@@ -3169,7 +3187,7 @@ def run_deepen(
             entry=entry,
             path=str(_Path(declaration.mount_path) / entry.relative_path),
             is_remote=on_a_share(entry),
-            deadline_seconds=file_ceiling_for(entry.size_bytes, settings.extraction),
+            deadline_seconds=_file_ceiling(entry, settings),
             **asks,
         )
 
@@ -3256,6 +3274,13 @@ def run_deepen(
         entry = result.task.entry
         signing = sign_only.get(entry.entry_id)
         outcome = result.outcome
+        if result.killed_for == "stopped":
+            # A stop's grace ended with the file in hand. It was only interrupted, so it is
+            # counted as not reached, as the files the stop never handed out are, and whatever an
+            # earlier run recorded of it stands. Its seconds are not spent, so a stop is never
+            # reported as a budget that ran out.
+            budget.unreached += 1
+            return
         budget.spend(outcome.seconds)
         if series_first and signing is None:
             series_said.setdefault(series_key_of(entry), {})[entry.entry_id] = series_signature(
@@ -3510,6 +3535,10 @@ def run_deepen(
         asked keeps them.
         """
         entry, outcome = result.task.entry, result.outcome
+        if result.killed_for == "stopped":
+            # Interrupted by a stop and not refused by the file: not reached, as in ``consume``.
+            budget.unreached += 1
+            return False
         budget.spend(outcome.seconds)
         report.bytes_read += outcome.bytes_read
         if result.killed_for is not None or outcome.outcome is ScanOutcome.CONTENT_ERROR:
@@ -3661,6 +3690,7 @@ def run_deepen(
         worker_timeouts=reader.timeouts,
         worker_deaths=reader.deaths,
         workers_recycled=reader.recycled,
+        files_stopped=reader.stopped,
         # Whether the kernel took the workers' address-space limit.
         kernel_limit=getattr(reader, "kernel_limit", None),
     )
