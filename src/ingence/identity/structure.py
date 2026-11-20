@@ -72,7 +72,7 @@ class TabularSchema:
 
     def compute(self, context: ExtractionContext) -> IdentityResult | None:
         try:
-            with context.path.open("rb") as handle:
+            with context.open() as handle:
                 head = handle.read(HEADER_BYTES)
         except OSError:
             return None
@@ -132,7 +132,7 @@ class ArraySignature:
 
     def compute(self, context: ExtractionContext) -> IdentityResult | None:
         try:
-            with context.path.open("rb") as handle:
+            with context.open() as handle:
                 head = handle.read(HEADER_BYTES)
         except OSError:
             return None

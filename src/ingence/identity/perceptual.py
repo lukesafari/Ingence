@@ -108,7 +108,7 @@ class TextMinHash:
         limits = getattr(context, "limits", None)
         sample = int(getattr(limits, "text_sketch_bytes", 0) or TEXT_SAMPLE_BYTES)
         try:
-            with context.path.open("rb") as handle:
+            with context.open() as handle:
                 payload = handle.read(sample)
         except OSError:
             return None

@@ -42,7 +42,9 @@ from ingence.core.tiers import ExtractionTier
 from ingence.dictionary.file_types import file_type_table
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+    from typing import BinaryIO
 
 __all__ = [
     "DETECTORS",
@@ -179,7 +181,9 @@ DETECTORS: Registry[TypeDetector] = Registry("type_detector")
 # ---------------------------------------------------------------------------
 
 
-def sample_head_and_tail(path: Path, *, size: int = SAMPLE_BYTES) -> bytes:
+def sample_head_and_tail(
+    path: Path, *, size: int = SAMPLE_BYTES, opener: Callable[[], BinaryIO] | None = None
+) -> bytes:
     """Read a bounded sample from the start and end of a file.
 
     Both ends, because several formats put their structure at the end: a ZIP's
@@ -187,12 +191,16 @@ def sample_head_and_tail(path: Path, *, size: int = SAMPLE_BYTES) -> bytes:
     head would miss them and reading the whole file would make detection cost
     proportional to size, which for a data pool of microscopy stacks is the
     difference between seconds and hours.
+
+    ``opener`` opens the file where the caller decides how it is reached. A dive passes its
+    context's own opening, which reaches the file from its root and never through a link, so
+    detection reads the file every other reader reads and nothing a link leads to.
     """
     # An OSError is the caller's to record. If this function swallowed it, a file on a share
     # that had stopped answering would look empty and be detected as nothing, and the pass
     # would go on to read a body that was not there. Recorded, it is an access failure against
     # the file, and twenty of them across two folders make the pass look at the root.
-    with path.open("rb") as handle:
+    with path.open("rb") if opener is None else opener() as handle:
         head = handle.read(size)
         handle.seek(0, 2)
         length = handle.tell()

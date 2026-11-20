@@ -69,8 +69,9 @@ from ingence.extractors.limits import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
+    from typing import BinaryIO
 
     from ingence.extractors.base import ExtractionContext
 
@@ -437,7 +438,13 @@ def _build_archive() -> ArchiveExtractor:
     return ArchiveExtractor()
 
 
-def materialise(path: Path, locator: Sequence[LocatorStep], *, limit: int) -> bytes | None:
+def materialise(
+    path: Path,
+    locator: Sequence[LocatorStep],
+    *,
+    limit: int,
+    opener: Callable[[], BinaryIO] | None = None,
+) -> bytes | None:
     """Read the bytes of a stream inside a container by following its locator.
 
     The other half of the cascade. Expansion discovers what is inside a container
@@ -451,9 +458,13 @@ def materialise(path: Path, locator: Sequence[LocatorStep], *, limit: int) -> by
     Returns ``None`` where the chain no longer resolves: the container changed,
     the member is gone, the format is unsupported. A missing member is a fact
     about the container, not an error in the reader.
+
+    ``opener`` opens the container where the caller decides how it is reached. A dive passes
+    the container's own context opening, which reaches it from its root and never through a
+    link, so a member is read from the file the census found and from nowhere else.
     """
     payload: bytes | None = None
-    with path.open("rb") as handle:
+    with path.open("rb") if opener is None else opener() as handle:
         current: bytes = handle.read(limit)
 
     for step in locator:

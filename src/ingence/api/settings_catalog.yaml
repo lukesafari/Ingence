@@ -94,7 +94,7 @@ settings:
   extraction.enabled: "Whether Ingence reads file contents at all; the reading depth sets it"
   extraction.exclude_extensions: "File extensions whose contents are never read"
   extraction.file_seconds: "Seconds one file's whole reading may take, detection and identity included"
-  extraction.freshness_checks_identity: "Whether Ingence also discards what it read from a file that was replaced while Ingence read it"
+  extraction.freshness_checks_identity: "Whether Ingence also compares a file's inode and device, so a file replaced since the listing, or while Ingence read it, is not read as the one it replaced"
   extraction.include_extensions: "When filled, only these file extensions are read inside"
   extraction.max_expansion_depth: "How many levels of archives within archives may be opened"
   extraction.max_expansion_members: "Most files one archive may yield when opened"

@@ -63,7 +63,9 @@ class WholeDigest:
         digest = blake3()
         read = 0
         try:
-            with context.path.open("rb") as handle:
+            # Opened through the context, as every reader opens a file, so a dive's digest is
+            # taken of the file reached from its root and never of what a link leads to.
+            with context.open() as handle:
                 while True:
                     block = handle.read(CHUNK_BYTES)
                     if not block:
@@ -108,7 +110,7 @@ class QuickDigest:
         digest.update(str(context.size_bytes).encode("ascii"))
         read = 0
         try:
-            with context.path.open("rb") as handle:
+            with context.open() as handle:
                 head = handle.read(PROBE_BYTES)
                 digest.update(head)
                 read += len(head)

@@ -65,7 +65,7 @@ from ingence.core.invariants import (
     check_all,
 )
 from ingence.core.links import characterise_link_target
-from ingence.core.platform import gives, lstat_entry, lstat_path
+from ingence.core.platform import gives, is_junction, lstat_entry, lstat_path
 from ingence.core.project import Project, is_listing_root, refuse_unreachable_roots
 from ingence.core.relations import Primitive
 from ingence.core.run_records import build_run_record, counting_warnings
@@ -792,7 +792,9 @@ class _Walker:
         operating system hands over that the Index cannot hold is recorded against the
         entry as a scan error, and the entry is indexed without it, so one strange file
         is one entry's fact and not a census that publishes nothing. A column
-        that cannot be absent is a defect in the engine and stops the census, loudly.
+        that cannot be absent is a defect in the engine. It is raised, and the walk records it
+        against the entry as it records any failure it did not foresee (``scan_directory``), so
+        the defect is in the run's errors for a person to report, and the census still publishes.
 
         This is a comprehension failure, where every other census error is access. Nothing is
         wrong with the mount or the permissions. The engine could not represent what it
@@ -842,6 +844,62 @@ class _Walker:
             message=str(exc),
             run_id=self.run_id,
             failure_class=FailureClass.ACCESS,
+        )
+
+    def undecodable_name(self, relative: str) -> ScanError:
+        """The record of a listed name that is not text, left out with everything beneath it.
+
+        Linux hands a name that is not valid UTF-8 to Python with each undecodable byte as a
+        lone surrogate (``b"bad\\xff.txt"`` becomes ``"bad\\udcff.txt"``), and Windows can hold
+        an unpaired surrogate in a name. The Index stores names and paths as UTF-8 text, and no
+        UTF-8 text holds a lone surrogate, so the entry could be neither stored nor identified.
+        Indexing it under some escaped spelling instead would be worse than leaving it out. The
+        spelling would not name the file, so a dive would open whatever file has that spelling,
+        and two files could share it.
+
+        The name is therefore recorded here, spelled with each character UTF-8 cannot carry
+        written as a backslash escape, so a person can find the file and rename it. An ordinary
+        name holds no such character, so its spelling, and every identifier made from it, is
+        exactly what it was. The record's identifier is made from the escaped spelling, as every
+        census error's is made from its path, which is how a rebind finds the root it belongs
+        to. The failure is a comprehension one: nothing is wrong with the mount or the
+        permissions, and the Index cannot represent what it was told.
+        """
+        spelled = _escaped(relative)
+        self.counts.errors += 1
+        return ScanError(
+            entry_id=self.identifier(spelled),
+            relative_path=spelled,
+            operation=NAME_OPERATION,
+            error_type="UndecodableName",
+            message=(
+                f"the name is not valid text ({spelled}, its undecodable bytes written as "
+                "escapes), which the Index cannot store, so it is left out with everything "
+                "beneath it; renaming it lets the next walk read it"
+            ),
+            run_id=self.run_id,
+            failure_class=FailureClass.COMPREHENSION,
+        )
+
+    def unexpected(self, relative: str, exc: Exception, *, operation: str) -> ScanError:
+        """The record of a failure the walk did not foresee while it looked at one listed name.
+
+        A failure here is the engine's, not the environment's: every failure the environment
+        can cause (a permission, a mount, a file gone) is an ``OSError`` that the walk records
+        where it happens. So the record is a comprehension failure, and it names the exception
+        and what it said, so a person can report it. The path and the message are written so the
+        Index can store them whatever the name held.
+        """
+        spelled = _escaped(relative)
+        self.counts.errors += 1
+        return ScanError(
+            entry_id=self.identifier(spelled),
+            relative_path=spelled,
+            operation=operation,
+            error_type=type(exc).__name__,
+            message=_escaped(str(exc)) or type(exc).__name__,
+            run_id=self.run_id,
+            failure_class=FailureClass.COMPREHENSION,
         )
 
     # -- the walk ---------------------------------------------------------
@@ -962,7 +1020,14 @@ class _Walker:
         )
 
     def scan_directory(self, pending: _Pending) -> tuple[CensusRecords, list[_Pending]]:
-        """Enumerate one directory. Never raises for anything it can record."""
+        """Enumerate one directory. Never raises for anything it can record.
+
+        One listed name is one name's business. A name the Index cannot store, or any failure
+        the walk did not foresee while it looked at one name, is recorded against that name as
+        a scan error, and the walk goes on to the next. Without that, the failure would leave
+        the worker, end the census at ``future.result()`` and publish nothing at all, so one
+        strange file in a pool of a million would cost the person the other 999,999.
+        """
         records = CensusRecords()
         children: list[_Pending] = []
         try:
@@ -978,133 +1043,175 @@ class _Walker:
         built: list[Entry] = []
         for item in found:
             relative = item.name if pending.relative == "." else f"{pending.relative}/{item.name}"
-            # The project this run writes never enters its census, from its
-            # first run and wherever it lies. In its own folder each name it writes is left out,
-            # before anything else is asked of it, so nothing of it is counted either.
-            if pending.own and (
-                is_project_name(item.name) or spelled_otherwise(pending.path, item.name)
-            ):
-                records.recognised.append(self.this_project(relative))
-                continue
-            own = item.path == self.own_path
-            exclusion = self.exclusion(relative, item.name)
-            if exclusion is not None and own:
-                # The person's exclusions and the hidden-name setting hold for it too. The
-                # run record names it, and nothing in it is walked.
-                records.recognised.append(self.this_project(relative))
-                continue
-            if exclusion is not None:
-                records.excluded[(*exclusion, _listed_type(item))] += 1
-                continue
-            depth = pending.depth + 1
-            if self.settings.scan.max_depth is not None and depth > self.settings.scan.max_depth:
-                records.excluded[(ExclusionReason.MAX_DEPTH, None, _listed_type(item))] += 1
-                continue
+            # Where this name's records begin, so a failure takes back its entry and the
+            # readings made of it, and leaves no reading without its entry.
+            marks = (len(built), len(children), len(records.observations))
             try:
-                # Reuses the data directory enumeration already returned where
-                # the platform provides it, which is most of the saving on a
-                # latency-bound share. On Linux the one call is ``statx``, for the
-                # birth time Python's ``stat`` does not give (see core/platform).
-                result = lstat_entry(item)
-                if _RESTAT_DIRECTORIES and item.is_dir(follow_symlinks=False):
-                    # Keeps the cached reading where a handle cannot be opened,
-                    # rather than losing the entry. A folder that enumeration can
-                    # see and a handle cannot open is still a folder, and
-                    # recording it with a timestamp that may be stale is a
-                    # smaller error than reporting a data pool with fewer
-                    # directories than it has.
-                    with suppress(OSError):
-                        result = os.stat(item.path, follow_symlinks=False)
-            except OSError as exc:
-                records.errors.append(self.error(relative, "stat", exc))
-                continue
+                # The project this run writes never enters its census, from its
+                # first run and wherever it lies. In its own folder each name it writes is left
+                # out, before anything else is asked of it, so nothing of it is counted either.
+                if pending.own and (
+                    is_project_name(item.name) or spelled_otherwise(pending.path, item.name)
+                ):
+                    records.recognised.append(self.this_project(relative))
+                    continue
+                own = item.path == self.own_path
+                exclusion = self.exclusion(relative, item.name)
+                if exclusion is not None and own:
+                    # The person's exclusions and the hidden-name setting hold for it too. The
+                    # run record names it, and nothing in it is walked.
+                    records.recognised.append(self.this_project(relative))
+                    continue
+                if exclusion is not None:
+                    records.excluded[(*exclusion, _listed_type(item))] += 1
+                    continue
+                depth = pending.depth + 1
+                if (
+                    self.settings.scan.max_depth is not None
+                    and depth > self.settings.scan.max_depth
+                ):
+                    records.excluded[(ExclusionReason.MAX_DEPTH, None, _listed_type(item))] += 1
+                    continue
+                if not _is_text(item.name):
+                    # Before anything is asked of it: no entry, identifier or record can hold
+                    # this name, and a folder of that name is not walked.
+                    records.errors.append(self.undecodable_name(relative))
+                    continue
+                try:
+                    # Reuses the data directory enumeration already returned where
+                    # the platform provides it, which is most of the saving on a
+                    # latency-bound share. On Linux the one call is ``statx``, for the
+                    # birth time Python's ``stat`` does not give (see core/platform).
+                    result = lstat_entry(item)
+                    if _RESTAT_DIRECTORIES and item.is_dir(follow_symlinks=False):
+                        # Keeps the cached reading where a handle cannot be opened,
+                        # rather than losing the entry. A folder that enumeration can
+                        # see and a handle cannot open is still a folder, and
+                        # recording it with a timestamp that may be stale is a
+                        # smaller error than reporting a data pool with fewer
+                        # directories than it has.
+                        with suppress(OSError):
+                            result = os.stat(item.path, follow_symlinks=False)
+                except OSError as exc:
+                    records.errors.append(self.error(relative, "stat", exc))
+                    continue
+                # A Windows junction is a link that ``lstat`` calls a folder (core/platform). It
+                # is recorded as the link it is, its target read from its text, and it is never
+                # walked into, looked into or recognised, because what it names may lie outside
+                # the root. Elsewhere there are no junctions, and this asks nothing.
+                junction = is_junction(item)
 
-            own = own or (
-                self.own_project is not None and self.own_project.is_folder(item.path, result)
-            )
-            if own and not self.holds_a_persons_files(Path(item.path), relative):
-                records.recognised.append(self.this_project(relative))
-                continue
-
-            # Recognised before its entry is built, so nothing inside a directory the
-            # engine wrote enters the Index unless the settings ask for it.
-            recognised = (
-                None
-                if own
-                else recognise_directory(Path(item.path), result, installation=self.installation)
-            )
-            if recognised is not None:
-                indexed = (
-                    recognised is not RecognisedAs.INSTALLATION
-                    and self.settings.scan.index_recognised_outputs
+                own = own or (
+                    self.own_project is not None and self.own_project.is_folder(item.path, result)
                 )
-                records.recognised.append(
-                    RecognisedPath(
-                        root_id=self.root.root_id,
-                        relative_path=relative,
-                        recognised_as=recognised,
-                        indexed=indexed,
-                    )
-                )
-                if not indexed:
+                if own and not self.holds_a_persons_files(Path(item.path), relative):
+                    records.recognised.append(self.this_project(relative))
                     continue
 
-            target: str | None = None
-            link_state = SymlinkState.NOT_A_LINK
-            if stat_module.S_ISLNK(result.st_mode):
-                link_state = SymlinkState.UNREADABLE
-                try:
-                    target = os.readlink(item.path)
-                except OSError as exc:
-                    records.errors.append(self.error(relative, "readlink", exc))
-                if target is not None and self.link_leaves_root(item.path, target):
-                    # Never stat-ed, whatever the setting: a census reads nothing outside
-                    # the roots it was given.
-                    link_state = SymlinkState.OUTSIDE_ROOT
-                elif target is not None and self.settings.scan.resolve_symlinks:
-                    link_state = self.resolve_link(item.path, target)
-
-            entry = self.storable(
-                self.build_entry(
-                    name=item.name,
-                    relative=relative,
-                    parent=pending.entry,
-                    depth=depth,
-                    result=result,
-                    symlink_target=target,
-                    symlink_state=link_state,
-                ),
-                records,
-            )
-            built.append(entry)
-            listed.append(entry.entry_id)
-            if entry.entry_type is EntryType.OTHER:
-                kind = self.object_kind(entry, int(result.st_mode))
-                if kind is not None:
-                    records.observations.append(kind)
-            characterised = self.link_target(entry)
-            if characterised is not None:
-                records.observations.append(characterised)
-
-            if entry.entry_type is EntryType.DIRECTORY and not self.crosses_filesystem(
-                Path(item.path), result
-            ):
-                children.append(
-                    _Pending(
-                        path=Path(item.path),
-                        relative=relative,
-                        entry=entry.entry_id,
-                        depth=depth,
-                        own=own,
+                # Recognised before its entry is built, so nothing inside a directory the
+                # engine wrote enters the Index unless the settings ask for it.
+                recognised = (
+                    None
+                    if own or junction
+                    else recognise_directory(
+                        Path(item.path), result, installation=self.installation
                     )
                 )
+                if recognised is not None:
+                    indexed = (
+                        recognised is not RecognisedAs.INSTALLATION
+                        and self.settings.scan.index_recognised_outputs
+                    )
+                    records.recognised.append(
+                        RecognisedPath(
+                            root_id=self.root.root_id,
+                            relative_path=relative,
+                            recognised_as=recognised,
+                            indexed=indexed,
+                        )
+                    )
+                    if not indexed:
+                        continue
+
+                target: str | None = None
+                link_state = SymlinkState.NOT_A_LINK
+                if junction or stat_module.S_ISLNK(result.st_mode):
+                    link_state = SymlinkState.UNREADABLE
+                    try:
+                        target = os.readlink(item.path)
+                    except OSError as exc:
+                        records.errors.append(self.error(relative, "readlink", exc))
+                    if target is not None and self.link_leaves_root(item.path, target):
+                        # Never stat-ed, whatever the setting: a census reads nothing outside
+                        # the roots it was given.
+                        link_state = SymlinkState.OUTSIDE_ROOT
+                    elif target is not None and self.settings.scan.resolve_symlinks:
+                        link_state = self.resolve_link(item.path, target)
+
+                entry = self.storable(
+                    self.build_entry(
+                        name=item.name,
+                        relative=relative,
+                        parent=pending.entry,
+                        depth=depth,
+                        result=result,
+                        symlink_target=target,
+                        symlink_state=link_state,
+                        # Its mode says folder, which is what it names and not what it is.
+                        kind=EntryType.SYMLINK if junction else None,
+                    ),
+                    records,
+                )
+                built.append(entry)
+                listed.append(entry.entry_id)
+                if entry.entry_type is EntryType.OTHER:
+                    kind = self.object_kind(entry, int(result.st_mode))
+                    if kind is not None:
+                        records.observations.append(kind)
+                characterised = self.link_target(entry)
+                if characterised is not None:
+                    records.observations.append(characterised)
+
+                if entry.entry_type is EntryType.DIRECTORY and not self.crosses_filesystem(
+                    Path(item.path), result
+                ):
+                    children.append(
+                        _Pending(
+                            path=Path(item.path),
+                            relative=relative,
+                            entry=entry.entry_id,
+                            depth=depth,
+                            own=own,
+                        )
+                    )
+            except CancelledError:
+                raise
+            except Exception as exc:
+                # The name is left out whole: its entry, the readings made of it, and the folder
+                # it would have opened. The records it made before failing, such as an access
+                # error, are facts and stay.
+                del built[marks[0] :], listed[marks[0] :]
+                del children[marks[1] :], records.observations[marks[2] :]
+                records.errors.append(self.unexpected(relative, exc, operation=ENTRY_OPERATION))
         self.observe_series(built)
         for entry in built:
-            # Checked again as it is stored: reading the name may date the entry
-            # and a kept reading may carry a clock, both after the first check. A date that a
-            # name spells and that no instant can hold would stop a census.
-            final = self.storable(self.kept_content(self.read_name_of(entry, records)), records)
-            self.date_order_evidence(final, records)
+            try:
+                # Checked again as it is stored: reading the name may date the entry
+                # and a kept reading may carry a clock, both after the first check. A date that
+                # a name spells and that no instant can hold would stop a census.
+                final = self.storable(self.kept_content(self.read_name_of(entry, records)), records)
+                self.date_order_evidence(final, records)
+            except CancelledError:
+                raise
+            except Exception as exc:
+                # The entry stands as its stat described it, without what its name or a kept
+                # reading would have added, and the failure is recorded against it. The run
+                # keeps no earlier reading for it, since none was carried onto it.
+                self.counts.unchanged.discard(entry.entry_id)
+                records.errors.append(
+                    self.unexpected(entry.relative_path, exc, operation=NAME_READING_OPERATION)
+                )
+                final = entry
             records.entries.append(final)
         # One verdict per directory, once its listing is complete, and not an edge
         # built beside each entry as it was found.
@@ -1359,7 +1466,12 @@ def replay_root(
             result=_StoredStat(entry),  # type: ignore[arg-type]
             symlink_target=entry.symlink_target,
             symlink_state=state,
-            kind=entry.entry_type if entry.mode is None else None,
+            # A junction's mode says folder, and the walk recorded it as the link it is.
+            kind=(
+                entry.entry_type
+                if entry.mode is None or entry.entry_type is EntryType.SYMLINK
+                else None
+            ),
         )
         # The creation time is carried as recorded, never recomputed through a float.
         built = built.model_copy(
@@ -1494,6 +1606,7 @@ def follow_link_chain(
     folders_known: set[str] | None = None,
     lstat: Callable[[str], Any] | None = None,
     readlink: Callable[[str], str] | None = None,
+    junction: Callable[[str], bool] | None = None,
 ) -> SymlinkState:
     """Where a link's chain ends, followed hop by hop and never past the root.
 
@@ -1510,11 +1623,15 @@ def follow_link_chain(
     system would refuse too) is ``unreadable``.
 
     ``folders_known`` holds the folders a walk has already found real, so a link to a sibling
-    costs one ``lstat``, not one per folder above it. A Windows junction is not a hop: the
-    system reports it as a folder and walks through it.
+    costs one ``lstat``, not one per folder above it. A Windows junction is a hop too. The system
+    reports it as a folder and walks through it, so a chain walked through it as a folder would
+    look at whatever it names, outside the root as readily as in. Each folder on the way is
+    therefore asked ``junction`` (:func:`~ingence.core.platform.is_junction`, which asks nothing
+    where the system makes no junctions), and a junction's text is read as a link's is.
     """
     look = lstat if lstat is not None else os.lstat
     read = readlink if readlink is not None else os.readlink
+    is_a_junction = junction if junction is not None else is_junction
     known = folders_known if folders_known is not None else set()
     paths = ntpath if windows else posixpath
     folding = windows or case_insensitive
@@ -1552,7 +1669,7 @@ def follow_link_chain(
             except OSError:
                 return SymlinkState.UNREADABLE
             mode = found.st_mode
-            if stat_module.S_ISLNK(mode):
+            if stat_module.S_ISLNK(mode) or (stat_module.S_ISDIR(mode) and is_a_junction(step)):
                 try:
                     text = read(step)
                 except OSError:
@@ -1713,7 +1830,7 @@ def _accumulate(walker: _Walker, records: CensusRecords) -> None:
     for error in records.errors:
         if error.operation in _UNLISTED_OPERATIONS:
             walker.incompletely_listed.add(error.relative_path)
-        elif error.operation == _UNSTATED_CHILD_OPERATION:
+        elif error.operation in _UNSTATED_CHILD_OPERATIONS:
             parent = _parent_relative(error.relative_path)
             if parent is not None:
                 walker.incompletely_listed.add(parent)
@@ -1723,9 +1840,36 @@ def _accumulate(walker: _Walker, records: CensusRecords) -> None:
 #: the ``lstat`` before any listing. Nothing beneath such a directory was observed.
 _UNLISTED_OPERATIONS = frozenset({"scandir", "lstat"})
 
-#: The operation whose failure leaves a listed child without an entry, so its directory's
-#: listing holds a name the Index does not.
-_UNSTATED_CHILD_OPERATION = "stat"
+#: The operation a listed name the Index cannot store as text is recorded under.
+NAME_OPERATION = "name"
+#: The operation a failure the walk did not foresee on one listed name is recorded under.
+ENTRY_OPERATION = "entry"
+#: The operation a failure while reading an entry's name, or carrying its kept reading, is
+#: recorded under. The entry itself stands, so its folder's listing is still whole.
+NAME_READING_OPERATION = "read_name"
+
+#: The operations whose failure leaves a listed child without an entry, so its directory's
+#: listing holds a name the Index does not: a ``stat`` that failed, a name that is not text, and
+#: a failure the walk did not foresee.
+_UNSTATED_CHILD_OPERATIONS = frozenset({"stat", NAME_OPERATION, ENTRY_OPERATION})
+
+
+def _is_text(name: str) -> bool:
+    """Whether UTF-8 can carry a name: none of its characters is a lone surrogate."""
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _escaped(text: str) -> str:
+    """The text with each character UTF-8 cannot carry written as a backslash escape.
+
+    Text UTF-8 can carry is returned unchanged, character for character, so an ordinary path
+    spelled this way is its own spelling.
+    """
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 #: The Dictionary section whose terms record doubt rather than subject matter.
@@ -3214,10 +3358,10 @@ def _listed_type(item: os.DirEntry[str]) -> EntryType:
 
     The census never looks further at a name it leaves out, so the type is the one the
     directory listing gives, and a name whose type cannot be told is counted as other
-    rather than dropped.
+    rather than dropped. A Windows junction is counted as the link it is, as its entry is.
     """
     try:
-        if item.is_symlink():
+        if item.is_symlink() or is_junction(item):
             return EntryType.SYMLINK
         if item.is_dir(follow_symlinks=False):
             return EntryType.DIRECTORY

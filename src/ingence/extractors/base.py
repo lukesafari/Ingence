@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ingence.core.ids import LocatorStep
 from ingence.core.outcomes import ScanOutcome, SourceScope, TimeSource, ValueKind
+from ingence.core.platform import open_beneath
 from ingence.core.registry import Registry
 from ingence.core.tiers import ExtractionTier
 
@@ -223,15 +224,31 @@ class ExtractionContext:
     #: three containers deep carries the whole chain, which is what makes its
     #: provenance readable and what lets it be read again later.
     locator: tuple[LocatorStep, ...] = ()
+    #: The root ``path`` lies beneath, for a file a census found there. Every opening then
+    #: reaches the file from this folder one name at a time and never through a link or a
+    #: junction (:func:`~ingence.core.platform.open_beneath`), because a folder the census
+    #: walked may have been swapped for a link to somewhere else since, and a dive reads
+    #: nothing outside the roots it was given. ``None`` opens ``path`` as it is spelled, for
+    #: a file that no census found, such as one a test or a tool names directly.
+    beneath: Path | None = None
+    #: The device and inode the census recorded for the file, where it recorded them and the
+    #: settings compare them (``extraction.freshness_checks_identity``). The file opened must
+    #: carry them, or it is not the file the census described and nothing of it is read.
+    device: int | None = None
+    inode: int | None = None
 
     def open(self) -> BinaryIO:
         """Return a readable binary stream over this content.
 
         The one way an extractor reads. Backed by the file on disk, or by bytes
-        in memory for a derived stream.
+        in memory for a derived stream. A file opened beneath its root that is not the
+        file the census recorded raises :class:`~ingence.core.platform.NotTheRecordedFileError`,
+        an ``OSError``, before a byte of it is read.
         """
         if self.payload is not None:
             return io.BytesIO(self.payload)
+        if self.beneath is not None:
+            return open_beneath(self.path, self.beneath, device=self.device, inode=self.inode)
         return self.path.open("rb")
 
     def read(self, limit: int) -> bytes:

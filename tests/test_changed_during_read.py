@@ -128,7 +128,7 @@ def test_an_inode_a_filesystem_invents_is_checked_only_where_the_settings_say(
     path = tmp_path / "kelt.txt"
     path.write_text("a settled file\n")
     states = iter([(15, 1, 7, 3), (15, 1, 8, 3)])
-    monkeypatch.setattr(deepen, "source_state", lambda _: next(states))
+    monkeypatch.setattr(deepen, "source_state", lambda *_: next(states))
     entry = Entry(
         entry_id="entry_kelt",
         root_id="root_x",

@@ -55,6 +55,7 @@ from ingence.core.outcomes import (
     ClockTier,
     TimeSource,
 )
+from ingence.core.platform import NotTheRecordedFileError, stat_beneath
 from ingence.core.project import is_listing_root, refuse_unreachable_roots
 from ingence.core.relations import Primitive
 from ingence.core.schema import (
@@ -101,7 +102,7 @@ from ingence.extractors.base import (
     reading_depth_of,
 )
 from ingence.extractors.captured import WarningTallies, captured, summarise
-from ingence.extractors.detect import DETECTORS, ByteCharacter, detect
+from ingence.extractors.detect import DETECTORS, ByteCharacter, detect, sample_head_and_tail
 from ingence.extractors.limits import Limits, ceiling_for, file_ceiling_for
 from ingence.identity import DIGEST_ATTRIBUTE, IDENTITY_METHODS, digest_methods
 from ingence.identity import load_builtins as load_identity_builtins
@@ -136,6 +137,7 @@ from ingence.scan.rules import CASCADE_MEMBERSHIP, ScanRule, scan_rules
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
+    from typing import BinaryIO
 
     from ingence.core.settings import Settings
     from ingence.dictionary.store import DictionaryStore
@@ -210,18 +212,19 @@ def _root_wait(token: CancellationToken, seconds: float) -> bool:
     return token.wait(seconds)
 
 
-def _not_reached(entry: Entry, path: Path, *, run_id: str) -> DeepenOutcome:
+def _not_reached(entry: Entry, path: Path, beneath: Path, *, run_id: str) -> DeepenOutcome:
     """A file whose stat failed before anything was read: not reached, with one access record.
 
     Nothing is read of a file that cannot be stat-ed. If the pass read it, detection would name
     nothing, every reader would fail, and the file would become a content error with a pile of
     errors. Instead the file is unexamined (``DEFERRED``: content work was never attempted), the
-    next pass reads it, and the one record says what the system said.
+    next pass reads it, and the one record says what the system said. The system is asked again
+    the way the dive asked it, from the root and through no link (:func:`source_state`).
     """
     import errno
 
     try:
-        path.stat()
+        stat_beneath(path, beneath)
         kind, said = "OSError", "the file could not be stat-ed"
     except OSError as exc:
         name = errno.errorcode.get(exc.errno or 0, "")
@@ -1147,7 +1150,7 @@ SourceState = tuple[int | None, int | None, int | None, int | None]
 FRESHNESS_OPERATION = "freshness"
 
 
-def source_state(path: Path) -> SourceState | None:
+def source_state(path: Path, beneath: Path) -> SourceState | None:
     """The file's size, modification time, inode and device now, or None where it cannot be stat-ed.
 
     This is not the census's fingerprint (``scan/reuse.py``). The change time is left out, because
@@ -1155,9 +1158,18 @@ def source_state(path: Path) -> SourceState | None:
     bytes changing, not the metadata. The inode and device are in, because within one reading a
     file replaced by another (a program saving by writing a new file and renaming it over the
     old) can keep its size and time.
+
+    The file is looked at as a dive reaches it: from its root ``beneath``, one name at a time
+    with ``lstat`` (:func:`~ingence.core.platform.stat_beneath`). A ``stat`` of the whole path
+    would follow a link, and a folder the census walked may have become a link to a folder
+    outside the root holding a file of the same size and time. A link or a junction on the way,
+    or something other than a regular file where the file was, is not a state at all: it raises
+    :class:`~ingence.core.platform.NotTheRecordedFileError` for the caller to refuse the file.
     """
     try:
-        result = path.stat()
+        result = stat_beneath(path, beneath)
+    except NotTheRecordedFileError:
+        raise
     except OSError:
         return None
     return (
@@ -1225,20 +1237,29 @@ def deepen_entry(
     what was read may describe neither version, so the outcome is ``changed_during_read``
     (never reusable, so the next pass reads it again), every reading, digest, member and clock
     is dropped, and one access record says what moved.
+
+    The file is reached from its root and never through a link or a junction, before the reading
+    and at every opening in it (``core/platform``: ``stat_beneath``, ``open_beneath``). A file
+    whose way from the root now passes through one, or that is no longer a regular file, or
+    whose inode or device is not the census's, is not the file the census described. It is
+    refused as a file changed since the census is, before a byte of it is read: the same
+    outcome, and one access record saying why.
     """
     if progress is not None:
         progress("stat")
-    before = source_state(path)
+    beneath = _root_beneath(path, entry.relative_path)
+    identity = settings.extraction.freshness_checks_identity
+    try:
+        before = source_state(path, beneath)
+    except NotTheRecordedFileError as exc:
+        return _refused_as_changed(entry, _not_as_recorded(exc), run_id=run_id)
     if before is None:
-        return _not_reached(entry, path, run_id=run_id)
-    since = _changed_since_census(entry, before)
+        return _not_reached(entry, path, beneath, run_id=run_id)
+    since = _changed_since_census(entry, before, identity=identity)
     if since is not None:
         # Not the file the census described: its readings would be
         # filed under an entry of another size or time, so it is not opened until a walk.
-        refused = DeepenOutcome(entry_id=entry.entry_id, outcome=ScanOutcome.CHANGED_DURING_READ)
-        refused.warnings.append((FRESHNESS_OPERATION, since))
-        refused.errors.append(_freshness_error(entry, since, run_id=run_id))
-        return refused
+        return _refused_as_changed(entry, since, run_id=run_id)
     result = _read_entry(
         entry,
         path,
@@ -1256,13 +1277,19 @@ def deepen_entry(
         is_remote=is_remote,
         isolated=isolated,
         progress=progress,
+        beneath=beneath,
+        recorded=(entry.device, entry.inode) if identity else (None, None),
     )
     if before is None or result.outcome is ScanOutcome.SKIPPED_BY_POLICY:
         return result
     if progress is not None:
         progress("stat.again")
-    after = source_state(path)
-    compared = 4 if settings.extraction.freshness_checks_identity else 2
+    refusal: str | None = None
+    try:
+        after = source_state(path, beneath)
+    except NotTheRecordedFileError as exc:
+        after, refusal = None, _not_as_recorded(exc)
+    compared = 4 if identity else 2
     if after is not None and after[:compared] == before[:compared]:
         return result
     result.outcome = ScanOutcome.CHANGED_DURING_READ
@@ -1272,7 +1299,7 @@ def deepen_entry(
     result.errors.clear()
     result.event_time_ns = None
     result.event_time_source = None
-    said = _moved(before, after)
+    said = refusal or _moved(before, after)
     result.warnings.append((FRESHNESS_OPERATION, said))
     result.errors.append(_freshness_error(entry, said, run_id=run_id))
     return result
@@ -1314,23 +1341,86 @@ def _freshness_error(entry: Entry, said: str, *, run_id: str) -> ScanError:
     )
 
 
-def _changed_since_census(entry: Entry, before: SourceState | None) -> str | None:
+def _refused_as_changed(entry: Entry, said: str, *, run_id: str) -> DeepenOutcome:
+    """A file refused before it was opened, because it is not the file the census described."""
+    refused = DeepenOutcome(entry_id=entry.entry_id, outcome=ScanOutcome.CHANGED_DURING_READ)
+    refused.warnings.append((FRESHNESS_OPERATION, said))
+    refused.errors.append(_freshness_error(entry, said, run_id=run_id))
+    return refused
+
+
+def _not_as_recorded(refusal: NotTheRecordedFileError) -> str:
+    """Say in words why a file is not reached as the census recorded it, and what to do."""
+    return (
+        f"the file is not reached as the census recorded it: {refusal}. "
+        "Walk the folder again (ingence index) to read it"
+    )
+
+
+def _root_beneath(path: Path, relative: str) -> Path:
+    """The root a file lies beneath: ``path`` with the names of its relative path taken off.
+
+    A dive is handed each file's path as its root's mount joined to the relative path the census
+    recorded, and reaches the file again from that root, one name at a time. A caller that names
+    a file whose recorded relative path does not end its path (a test, or a tool reading one
+    file) gets the file's own folder, so the file itself is still never a link. A root that is
+    itself the file (relative path ``.``) is its own root.
+    """
+    names = tuple(part for part in relative.split("/") if part not in ("", "."))
+    if not names:
+        return path
+    if path.parts[-len(names) :] == names:
+        return path.parents[len(names) - 1]
+    return path.parent
+
+
+#: The 64 bits a recorded inode or device is compared on: the census stores a device as the signed
+#: reading of its bits (``census.device_as_stored``), and the system may hand it over unsigned.
+_IDENTITY_BITS = (1 << 64) - 1
+
+
+def _changed_since_census(
+    entry: Entry, before: SourceState | None, *, identity: bool = True
+) -> str | None:
     """Say how a file differs from what the census recorded of it, or None where it does not.
 
-    The check uses the size and modification time only, where both were recorded. The census's
-    inode and device are volatile, and a reading is refused for the bytes and not the mount.
+    The check uses the size and modification time where both were recorded. With ``identity``
+    (``extraction.freshness_checks_identity``, on by default) it compares the inode and the
+    device too, each where the census recorded one. Size and time alone are not enough. A folder
+    on the way to the file can be swapped for something holding another file of the same size
+    and time, and a program can replace a file and set its time back. The inode and device are
+    what tell such a file from the one the census saw. They are volatile: a filesystem may
+    invent an inode per lookup, and a disk mounted again may come back under another device
+    number. Either refuses every file until a walk records the new numbers, which is the safe
+    answer and a recoverable one, and the same setting turns the comparison off for such a mount.
     """
-    if before is None or entry.size_bytes is None or entry.modified_ns is None:
+    if before is None:
         return None
-    recorded = (entry.size_bytes, entry.modified_ns)
-    if before[:2] == recorded:
+    changed: list[str] = []
+    if entry.size_bytes is not None and entry.modified_ns is not None:
+        recorded = (entry.size_bytes, entry.modified_ns)
+        changed += [
+            f"{name} {was} then {now}"
+            for name, was, now in zip(
+                ("size", "modification time"), recorded, before[:2], strict=True
+            )
+            if was != now
+        ]
+    if identity:
+        # Compared on their bits, and only where both readings hold one: a filesystem that
+        # gives no inode at all (Windows' listing, for one) has nothing to compare.
+        changed += [
+            f"{name} {was} then {now}"
+            for name, was, now in (
+                ("inode", entry.inode, before[2]),
+                ("device", entry.device, before[3]),
+            )
+            if was is not None
+            and now is not None
+            and (was & _IDENTITY_BITS) != (now & _IDENTITY_BITS)
+        ]
+    if not changed:
         return None
-    names = ("size", "modification time")
-    changed = [
-        f"{name} {was} then {now}"
-        for name, was, now in zip(names, recorded, before[:2], strict=True)
-        if was != now
-    ]
     return (
         "the file changed since the census recorded it: "
         + "; ".join(changed)
@@ -1356,8 +1446,14 @@ def _read_entry(
     is_remote: bool = False,
     isolated: bool = True,
     progress: Callable[[str], None] | None = None,
+    beneath: Path | None = None,
+    recorded: tuple[int | None, int | None] = (None, None),
 ) -> DeepenOutcome:
-    """Open one file, within limits, and record what was found (:func:`deepen_entry`'s body)."""
+    """Open one file, within limits, and record what was found (:func:`deepen_entry`'s body).
+
+    ``beneath`` is the root every opening reaches the file from, and ``recorded`` the device and
+    inode the census recorded that the file opened must carry (:class:`ExtractionContext`).
+    """
 
     def stage(name: str) -> int:
         """Say the stage is starting, and return the clock it is timed from."""
@@ -1421,10 +1517,32 @@ def _read_entry(
         if value
     )
 
+    # Made before routing, because detection's sample is read through it too: every opening of
+    # the file below, by a detector, an identity method, a reader or the cascade, reaches the
+    # file from its root and never through a link or a junction, and checks the file opened is
+    # the census's own before a byte of it is read.
+    context = ExtractionContext(
+        entry_id=entry.entry_id,
+        path=path,
+        relative_path=entry.relative_path,
+        extensions=extensions,
+        size_bytes=entry.size_bytes or 0,
+        limits=limits,
+        terms=terms,
+        beneath=beneath,
+        device=recorded[0],
+        inode=recorded[1],
+    )
+
     # -- routing ---------------------------------------------------------
     stage_started = stage("detect")
     try:
-        verdict = detect(path, extensions, enabled=detectors)
+        verdict = detect(
+            path,
+            extensions,
+            enabled=detectors,
+            sample=sample_head_and_tail(path, opener=context.open),
+        )
     except OSError as exc:
         result.stages.append(StageTiming("detect", time.monotonic_ns() - stage_started))
         result.errors.append(
@@ -1453,16 +1571,8 @@ def _read_entry(
         )
     )
 
-    context = ExtractionContext(
-        entry_id=entry.entry_id,
-        path=path,
-        relative_path=entry.relative_path,
-        extensions=extensions,
-        size_bytes=entry.size_bytes or 0,
-        media_type=verdict.media_type,
-        media_type_source=verdict.chosen_by,
-        limits=limits,
-        terms=terms,
+    context = dataclasses.replace(
+        context, media_type=verdict.media_type, media_type_source=verdict.chosen_by
     )
 
     # -- identity --------------------------------------------------------
@@ -1718,6 +1828,7 @@ def _read_entry(
                 _examine_member(
                     member,
                     container=path,
+                    opener=context.open,
                     run_id=run_id,
                     observed_at=observed_at,
                     settings=settings,
@@ -3986,6 +4097,7 @@ def _examine_member(
     supervisor: Supervisor | None,
     membership: ScanRule | None = None,
     roots: Sequence[PoolRoot] = (),
+    opener: Callable[[], BinaryIO] | None = None,
 ) -> None:
     """Examine one promoted member exactly as a file would be examined.
 
@@ -3993,6 +4105,10 @@ def _examine_member(
     the container and are never written anywhere. Its readings are recorded
     against the member's own entry, so a table inside an archive has its columns
     on the table rather than smeared onto the archive.
+
+    ``opener`` opens the container as the container's own reading did (its context's
+    opening), so a member is read from the file the census found beneath its root and from
+    nothing a link leads to.
     """
     from ingence.extractors.archive import materialise
 
@@ -4000,7 +4116,16 @@ def _examine_member(
     # extension, and its size once extracted, where the container stated it.
     if _member_set_aside(member, member.size_bytes, settings=settings, into=into):
         return
-    payload = materialise(container, member.locator_chain, limit=limits.max_bytes_read)
+    try:
+        payload = materialise(
+            container, member.locator_chain, limit=limits.max_bytes_read, opener=opener
+        )
+    except OSError:
+        # The container could not be opened again: it is gone, or it is no longer the file
+        # the census recorded. Either way the member was seen and cannot be re-read, which is
+        # recorded below as an unresolved chain, and the check after the reading says what
+        # became of the container.
+        payload = None
     if (
         payload is not None
         and member.size_bytes is None
@@ -4114,6 +4239,7 @@ def _examine_member(
             _examine_member(
                 deeper,
                 container=container,
+                opener=opener,
                 run_id=run_id,
                 observed_at=observed_at,
                 settings=settings,

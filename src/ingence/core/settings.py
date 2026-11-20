@@ -425,10 +425,14 @@ class ExtractionSettings(Setting):
     #: Whether the engine refuses a reading that the file's inode or device moved under. The
     #: engine compares a file's size and modification time before and after every reading, and a
     #: difference keeps none of the reading. Where this is on, it compares the inode and device
-    #: too, which catches a file replaced under the same size and time. When it is off, a
-    #: filesystem that invents an inode per lookup (some network and FUSE mounts) cannot make
-    #: every reading on it look changed. The default is on. Turn it off on a mount that invents an
-    #: inode per lookup.
+    #: too, which catches a file replaced under the same size and time. It also compares them with
+    #: the ones the census recorded, before the file is read and at every opening of it, so a file
+    #: replaced since the walk, or reached through a folder swapped for another, is refused until
+    #: a walk records it. When it is off, a filesystem that invents an inode per lookup (some
+    #: network and FUSE mounts) cannot make every reading on it look changed, and a disk mounted
+    #: again under another device number cannot make every file on it look replaced. Either way a
+    #: dive reaches each file from its root and never through a link, and opens only a regular
+    #: file. The default is on. Turn it off on a mount that invents an inode per lookup.
     freshness_checks_identity: bool = True
     #: An ND2 read for its clock alone. When this is on, a file with one of
     #: ``clock_only_extensions`` is read by detection, by the digest that the hash mode names, and
