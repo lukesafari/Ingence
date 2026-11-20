@@ -387,7 +387,14 @@ def _groupings_export(project: Path) -> dict[str, Any]:
         out, fieldnames=["decision", "when", "who", "about", "kind", "answer", "note"]
     )
     writer.writeheader()
-    writer.writerows(rows)
+    # A note, a name or an answer may come from a colleague's imported sheet: text a spreadsheet
+    # would read as a formula is written as the text it is (``api.v1.topic_export.csv_cell``).
+    from ingence.api.v1.topic_export import csv_cell
+
+    writer.writerows(
+        {name: csv_cell(value) if isinstance(value, str) else value for name, value in row.items()}
+        for row in rows
+    )
     return {"file_name": "ingence-groupings.csv", "text": out.getvalue(), "count": len(rows)}
 
 

@@ -162,6 +162,14 @@ def reorganisation(
     and ``states_no_sizes`` (per run, ``before`` and ``after``), and the whole report under
     ``report``.
     """
+    if before or after:
+        # Only runs this project holds, by their names: a name is joined to the project's runs
+        # folder, and one spelled ``../../another/runs/...`` would compare another project's
+        # files (``/api/changes`` refuses the same).
+        held = set(project_run_names(project))
+        if not before or not after or before not in held or after not in held:
+            message = "a comparison names two runs this project holds"
+            raise LookupError(message)
     chosen = (before, after) if before and after else census_pair(project)
     if chosen is None:
         return {"available": False, "noticed": False, "notice": None, "folder_lines": {}}

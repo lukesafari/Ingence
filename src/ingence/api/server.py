@@ -276,11 +276,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         """Stay silent by default. A request log that names paths records somebody's data."""
 
+    def end_headers(self) -> None:
+        """Close every response's headers with the ones that keep other sites out.
+
+        A page on another site may not show this one in a frame (``frame-ancestors 'none'`` and
+        ``X-Frame-Options``): every write here is one click, and a frame made nearly invisible
+        could steer a person's clicks into the Record. Nothing here is loaded by another site as a
+        script, a style or an image (``Cross-Origin-Resource-Policy``), and nothing is read as a
+        type other than the one sent (``nosniff``).
+        """
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        super().end_headers()
+
     def do_GET(self) -> None:
         if self._refused_for_its_host():
             return
         parsed = urlparse(self.path)
         route = unquote(parsed.path)
+        if route.startswith("/api/") and self._read_from_another_site():
+            return
         if route in LANDING_ADDRESSES or (route in ("", "/", "/index.html") and self._lands()):
             # The landing page: always at /landing, and at / until there is a run.
             self._serve_asset("/" + LANDING_PAGE)
@@ -514,6 +531,36 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     f"this Dashboard answers only at its own address, not at {host}: a request "
                     "made to another name is refused, which keeps other web pages out of this "
                     "project"
+                )
+            },
+            status=HTTPStatus.FORBIDDEN,
+        )
+        return True
+
+    def _read_from_another_site(self) -> bool:
+        """Refuse a read of the API that a page on another site started, before any work is done.
+
+        A browser hides the answer from the other page, but the server would already have done what
+        the request asked: looked at a folder named in it (on Windows, a ``\\\\host\\share``
+        name hands that host the person's sign-in), opened a project, or started a long query. A
+        browser says where a request came from (``Sec-Fetch-Site``, and ``Origin`` on most
+        requests). Only this server's own pages (``same-origin``) and a person typing the address
+        (``none``) may read; ``same-site`` is another port on this machine, another program's page.
+        A client that says neither (a command, a test) is not a browser page and is let through,
+        as the ``Host`` check above already applies. Return True where it was refused.
+        """
+        site = self.headers.get("Sec-Fetch-Site")
+        origin = self.headers.get("Origin")
+        refused = (site is not None and site not in ("same-origin", "none")) or (
+            origin is not None and origin not in self._own_origins()
+        )
+        if not refused:
+            return False
+        self._send_json(
+            {
+                "error": (
+                    "this Dashboard answers its own pages only: a read started by a page on "
+                    "another site is refused, which keeps other web pages out of this project"
                 )
             },
             status=HTTPStatus.FORBIDDEN,

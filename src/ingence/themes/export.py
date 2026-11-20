@@ -138,18 +138,28 @@ THEME_COLUMNS = (
 
 
 def _cell(value: Any) -> str:
+    """One cell's text. Text that a spreadsheet would read as a formula is written as the text it
+    is (``api.v1.topic_export.csv_cell``): a folder's name is anybody's to choose, and a folder
+    named ``=HYPERLINK(...)`` must not become a live link, or worse, when the table is opened. A
+    number stays a number, a negative one included."""
+    from ingence.api.v1.topic_export import csv_cell
+
     if value is None:
         return ""
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
     if isinstance(value, dict):
-        return "; ".join(f"{key}:{value[key]}" for key in value)
+        return csv_cell("; ".join(f"{key}:{value[key]}" for key in value))
     if isinstance(value, list):
-        return " · ".join(
-            str(item["word"]) if isinstance(item, dict) and "word" in item else str(item)
-            for item in value
+        return csv_cell(
+            " · ".join(
+                str(item["word"]) if isinstance(item, dict) and "word" in item else str(item)
+                for item in value
+            )
         )
-    return str(value)
+    return csv_cell(str(value))
 
 
 def write_tables(built: dict[str, Any], directory: Path) -> tuple[Path, Path]:
