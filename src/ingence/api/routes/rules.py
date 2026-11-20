@@ -32,6 +32,7 @@ from ingence.api.plain_words import rule_sentence
 from ingence.core.schema import ParameterSpec, Rule
 from ingence.rulebook.describe import decides, reads
 from ingence.rulebook.render import plain_reason, render_rule, value_in_force
+from ingence.storage.connection import arrow_table
 from ingence.storage.index_store import record_from_row
 
 if TYPE_CHECKING:
@@ -174,7 +175,7 @@ def rules(catalog: Catalog, project: Path | None = None) -> dict[str, Any]:
         held = read_draft(project, "rule_parameters")
         drafts = held.values
         draft_errors = held.errors
-    rows = catalog.query("SELECT * FROM rules ORDER BY rule_id, version").to_arrow_table()
+    rows = arrow_table(catalog.query("SELECT * FROM rules ORDER BY rule_id, version"))
     from ingence.rulebook.availability import NOT_AVAILABLE, unavailable_rules
 
     unavailable = unavailable_rules(

@@ -160,6 +160,7 @@ from ingence.storage.commit import (
     staging_path,
 )
 from ingence.storage.compact import compact_run
+from ingence.storage.connection import arrow_table
 from ingence.storage.index_store import FragmentWriter, record_from_row
 from ingence.storage.journal import Journal, NullJournal, open_journal
 from ingence.storage.layout import (
@@ -2316,11 +2317,9 @@ def run_census(
             recognised.extend(carried_recognised)
             carried_errors = [
                 record_from_row(row, ScanError)
-                for row in catalog.query(
-                    "SELECT * FROM scan_errors ORDER BY relative_path, operation"
-                )
-                .to_arrow_table()
-                .to_pylist()
+                for row in arrow_table(
+                    catalog.query("SELECT * FROM scan_errors ORDER BY relative_path, operation")
+                ).to_pylist()
             ]
             # What a dive read of the content: the bytes are unchanged, so the readings stand
             # and only the names are read again. Streamed, a batch at a time.
@@ -2541,13 +2540,13 @@ def run_census(
         with open_catalog(project.path) as catalog:
             moved_readings = [
                 _rekeyed(record_from_row(row, Observation), by_old, run_id=run_id)
-                for row in catalog.query(
-                    "SELECT * FROM observations WHERE observer NOT IN (SELECT unnest(?)) "
-                    "AND entry_id IN (SELECT unnest(?::VARCHAR[])) ORDER BY observation_id",
-                    [sorted(_CENSUS_OBSERVERS), sorted(by_old)],
-                )
-                .to_arrow_table()
-                .to_pylist()
+                for row in arrow_table(
+                    catalog.query(
+                        "SELECT * FROM observations WHERE observer NOT IN (SELECT unnest(?)) "
+                        "AND entry_id IN (SELECT unnest(?::VARCHAR[])) ORDER BY observation_id",
+                        [sorted(_CENSUS_OBSERVERS), sorted(by_old)],
+                    )
+                ).to_pylist()
             ]
         for reading in moved_readings:
             writers[Observation].add(reading, now=time.monotonic())

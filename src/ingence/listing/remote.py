@@ -260,6 +260,7 @@ def publish_remote_readings(
         staging_path,
     )
     from ingence.storage.compact import compact_run
+    from ingence.storage.connection import arrow_table
     from ingence.storage.index_store import FragmentWriter, record_from_row
     from ingence.storage.layout import TABLES, owned_path, table_for
 
@@ -344,7 +345,7 @@ def publish_remote_readings(
     # What the census left out and recognised travels with every later run, and the
     # vocabulary and packs it read: the parent's record is carried, with this run's own identity.
     with open_catalog(project.path) as catalog:
-        parent_rows = catalog.query("SELECT * FROM run").to_arrow_table().to_pylist()
+        parent_rows = arrow_table(catalog.query("SELECT * FROM run")).to_pylist()
     carried_fields: dict[str, Any] = {}
     if parent_rows:
         parent = record_from_row(parent_rows[0], RunRecord)

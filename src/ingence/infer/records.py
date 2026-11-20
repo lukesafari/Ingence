@@ -22,6 +22,7 @@ from ingence.core.schema import (
 )
 from ingence.infer.subjects import EntryRecords, ScopeRecords
 from ingence.rulebook.registry import Reads
+from ingence.storage.connection import arrow_reader
 from ingence.storage.views import view_from_row
 
 if TYPE_CHECKING:
@@ -216,7 +217,7 @@ def batched_rows(
     not from a materialised Arrow table. That table's ``to_batches`` copies while the table stays
     alive, so streaming from it costs more memory than it saves.
     """
-    reader = catalog.query(sql, parameters).to_arrow_reader(ROWS_PER_BATCH)
+    reader = arrow_reader(catalog.query(sql, parameters), ROWS_PER_BATCH)
     for batch in reader:
         yield from batch.to_pylist()
 

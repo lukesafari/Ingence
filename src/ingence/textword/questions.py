@@ -741,13 +741,12 @@ def _run_parameters(catalog: Catalog, rule_id: str) -> dict[str, object] | None:
     """
     from ingence.core.schema import Rule
     from ingence.rulebook.render import value_in_force
+    from ingence.storage.connection import arrow_table
     from ingence.storage.index_store import record_from_row
 
-    rows = (
+    rows = arrow_table(
         catalog.query("SELECT * FROM rules WHERE rule_id = ? ORDER BY version", [rule_id])
-        .to_arrow_table()
-        .to_pylist()
-    )
+    ).to_pylist()
     if not rows:
         return None
     rule = record_from_row(rows[-1], Rule)

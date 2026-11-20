@@ -31,13 +31,20 @@ classifiers = [
 # Add a dependency here only with a stated reason.
 # ---------------------------------------------------------------------------
 dependencies = [
-    # DuckDB 2.0 is untested here, and its DB-API Arrow path warns on the person's screen.
+    # DuckDB 2.0 is untested here, and its DB-API Arrow path warns on the person's screen. 1.0 is
+    # tested (tools/minimum-constraints.txt): every Arrow fetch goes through
+    # storage/connection.py, which takes the name each version has.
     "duckdb>=1.0,<2",
     "pyarrow>=16",
-    "pydantic>=2.7",
-    "typer>=0.12",
+    # Before 2.12, a census and an inference run without error and publish no claim from the
+    # extension rules: the result is wrong and nothing says so. 2.12 is the oldest measured right.
+    "pydantic>=2.12",
+    # Older releases stop `ingence --help` with an error under the click that installs with them
+    # today (click has no upper bound before 0.15.4, which caps it below 8.2). Measured, not guessed.
+    "typer>=0.15.4",
     "rich>=13.7",
-    "pyyaml>=6.0",
+    # 6.0 has no wheel for Python 3.12 and does not build from source there.
+    "pyyaml>=6.0.1",
     "blake3>=0.4",
     "numpy>=1.26",
     # Readers for the kinds of file every laboratory holds. The core reads images, tables, text,

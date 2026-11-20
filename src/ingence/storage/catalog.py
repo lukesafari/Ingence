@@ -28,6 +28,7 @@ from ingence.core.schema import Assertion, Entry, ExcludedNames, RecognisedPath,
 from ingence.identity import digest_methods
 from ingence.scan.reuse import PreviousRecord
 from ingence.storage.commit import resolve_current_run, run_path
+from ingence.storage.connection import arrow_reader
 from ingence.storage.connection import connect as duckdb_connection
 from ingence.storage.index_store import record_from_row
 from ingence.storage.layout import JSON_SUFFIX, RECORD_DIR, TABLES, TableSpec
@@ -126,9 +127,7 @@ class Catalog:
         table that can be large holds one batch and never the table.
         """
         result = self.connection.execute(sql, parameters)
-        # ``to_arrow_reader`` where DuckDB has it; ``fetch_record_batch`` is its older name.
-        read = getattr(result, "to_arrow_reader", None) or result.fetch_record_batch
-        for batch in read(rows or BATCH_ROWS):
+        for batch in arrow_reader(result, rows or BATCH_ROWS):
             yield batch.to_pylist()
 
     def count(self, table: str) -> int:

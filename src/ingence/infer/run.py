@@ -2470,7 +2470,9 @@ def _record_identifiers(records: EntryRecords) -> Iterable[str]:
 
 
 def _rows(result: object) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = result.to_arrow_table().to_pylist()  # type: ignore[attr-defined]
+    from ingence.storage.connection import arrow_table
+
+    rows: list[dict[str, object]] = arrow_table(result).to_pylist()
     return rows
 
 

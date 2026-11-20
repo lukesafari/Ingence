@@ -45,6 +45,7 @@ from ingence.dictionary.store import DictionaryStore
 from ingence.record.verdicts import WORTH_READING, shown_word, worth_reading
 from ingence.scan.reading_figure import reading_figure, reading_said
 from ingence.scan.reuse import policy_refusal
+from ingence.storage.connection import arrow_table
 from ingence.storage.index_store import record_from_row
 from ingence.storage.own_files import filesystem_entry
 
@@ -78,14 +79,12 @@ def coverage(
     for it. The count of those extensions is in ``unbound_extensions_answered``. The counts of
     files and of what a dive opened are over every extension either way.
     """
-    rows = (
+    rows = arrow_table(
         catalog.query(
             "SELECT * FROM entries WHERE entry_type = 'file' AND NOT is_deleted "  # noqa: S608
             f"AND {filesystem_entry()}"
         )
-        .to_arrow_table()
-        .to_pylist()
-    )
+    ).to_pylist()
     files = [record_from_row(row, Entry) for row in rows]
     store = DictionaryStore.for_project(project)
     said = worth_reading(project)

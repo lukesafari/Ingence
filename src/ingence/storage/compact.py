@@ -33,6 +33,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from ingence.core.ids import canonical_json
+from ingence.storage.connection import arrow_reader, arrow_table
 from ingence.storage.connection import connect as duckdb_connection
 from ingence.storage.index_store import COMPRESSION, ROW_GROUP_SIZE, fragment_paths
 from ingence.storage.layout import JSON_SUFFIX, owned_path
@@ -249,7 +250,7 @@ def _bucketed(
     paths = [directory / f".bucket-{number:03d}.incoming" for number in range(null_bucket + 1)]
     writers: dict[int, pq.ParquetWriter] = {}
     try:
-        for batch in result.to_arrow_reader(rows_per_batch):
+        for batch in arrow_reader(result, rows_per_batch):
             numbers = batch.column(_BUCKET)
             # The batch's rows grouped by bucket, then each bucket's run written to its file.
             held = pa.Table.from_batches([batch.take(pc.sort_indices(numbers))]).drop_columns(
@@ -279,10 +280,12 @@ def _bucketed(
 
 def _rows_per_batch(connection: duckdb.DuckDBPyConnection, sources: list[str], columns: str) -> int:
     """As many rows as :data:`BUCKETING_BYTES` holds, measured on the table's first rows."""
-    first_rows = connection.execute(
-        f"SELECT {columns} FROM read_parquet($sources, union_by_name = true) LIMIT 1024",  # noqa: S608
-        {"sources": sources},
-    ).to_arrow_table()
+    first_rows = arrow_table(
+        connection.execute(
+            f"SELECT {columns} FROM read_parquet($sources, union_by_name = true) LIMIT 1024",  # noqa: S608
+            {"sources": sources},
+        )
+    )
     if not first_rows.num_rows:
         return BATCH_ROWS
     width = max(1, int(first_rows.nbytes) // int(first_rows.num_rows))
@@ -302,7 +305,7 @@ def _write_sorted(
 ) -> int:
     """Write one sorted query's rows in batches; return how many."""
     written = 0
-    for batch in connection.execute(sql, parameters).to_arrow_reader(BATCH_ROWS):
+    for batch in arrow_reader(connection.execute(sql, parameters), BATCH_ROWS):
         # Cast and do not trust. DuckDB applies its own type mapping on the way out, and the
         # declared Arrow schema is the contract. A column that comes back as int32 must be stored
         # as int64, or the fragment will not concatenate with one written by pyarrow.

@@ -65,8 +65,10 @@ def test_a_connection_so_opened_loads_no_extension_by_itself() -> None:
 
 
 def test_a_connection_so_opened_reads_extensions_from_an_empty_folder_of_its_own() -> None:
-    """Never the person's ``~/.duckdb``, where any other DuckDB on the machine installs; the
-    engine's own folder is never written, so it stays empty."""
+    """Never the person's ``~/.duckdb``, where any other DuckDB on the machine installs; nothing is
+    installed into the engine's own folder, so it holds no file. (DuckDB 1.0 makes empty folders
+    named for its version and platform there when a connection opens; a folder is not an
+    extension.)"""
     from ingence.storage.connection import EXTENSION_DIRECTORY, connect
 
     with connect() as connection:
@@ -76,7 +78,7 @@ def test_a_connection_so_opened_reads_extensions_from_an_empty_folder_of_its_own
     assert folder == EXTENSION_DIRECTORY
     assert folder.is_absolute()
     assert Path.home() / ".duckdb" not in (folder, *folder.parents)
-    assert not folder.exists() or not any(folder.iterdir())
+    assert not folder.exists() or not [path for path in folder.rglob("*") if not path.is_dir()]
 
 
 def _plant_extensions(home: Path) -> Path:

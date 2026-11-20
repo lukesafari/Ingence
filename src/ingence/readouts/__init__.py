@@ -587,12 +587,15 @@ def _assuming_rules(catalog: Catalog) -> dict[str, tuple[str, str]]:
     """Each rule at the heuristic tier whose statement says it assumed: its tier and sentence."""
     from ingence.core.schema import Rule
     from ingence.rulebook.render import render_rule
+    from ingence.storage.connection import arrow_table
     from ingence.storage.index_store import record_from_row
 
     found: dict[str, tuple[str, str]] = {}
-    rows = catalog.query(
-        "SELECT * FROM rules WHERE tier = ? ORDER BY rule_id, version", [_ASSUMED_TIER]
-    ).to_arrow_table()
+    rows = arrow_table(
+        catalog.query(
+            "SELECT * FROM rules WHERE tier = ? ORDER BY rule_id, version", [_ASSUMED_TIER]
+        )
+    )
     for row in rows.to_pylist():
         statement = str(row.get("statement") or "")
         if not any(word in statement.casefold() for word in _ASSUMED_WORDS):

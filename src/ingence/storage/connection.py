@@ -33,8 +33,15 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import pyarrow as pa
 
-__all__ = ["EXTENSION_DIRECTORY", "SPILL_DIRECTORY", "connect"]
+__all__ = [
+    "EXTENSION_DIRECTORY",
+    "SPILL_DIRECTORY",
+    "arrow_reader",
+    "arrow_table",
+    "connect",
+]
 
 #: Where a connection spills a query larger than its memory: the system's temporary folder.
 SPILL_DIRECTORY = Path(tempfile.gettempdir()) / "ingence-duckdb"
@@ -54,3 +61,29 @@ def connect(database: str = ":memory:", **config: Any) -> duckdb.DuckDBPyConnect
         **config,
     }
     return duckdb.connect(database, config=settings)
+
+
+# ---------------------------------------------------------------------------
+# A result as Arrow, by whichever name the installed DuckDB gives it.
+#
+# DuckDB 1.4 named the two Arrow fetches ``to_arrow_table`` and ``to_arrow_reader``, and 1.5 warns
+# on the person's screen at the older names (``fetch_arrow_table``, ``fetch_record_batch``). DuckDB
+# 1.0 has only the older ones, and a census on it stopped at its first compaction with an
+# ``AttributeError``. Every fetch goes through these two, which take the newer name where it is and
+# the older one where it is not, so every version the package allows reads a run the same way.
+# ---------------------------------------------------------------------------
+
+
+def arrow_table(result: Any) -> pa.Table:
+    """A query's whole result as an Arrow table (``to_arrow_table``, or its older name)."""
+    fetch = getattr(result, "to_arrow_table", None) or result.fetch_arrow_table
+    table: pa.Table = fetch()
+    return table
+
+
+def arrow_reader(result: Any, rows: int) -> pa.RecordBatchReader:
+    """A query's result as a stream of Arrow batches of at most ``rows`` rows (``to_arrow_reader``,
+    or its older name)."""
+    read = getattr(result, "to_arrow_reader", None) or result.fetch_record_batch
+    reader: pa.RecordBatchReader = read(rows)
+    return reader
