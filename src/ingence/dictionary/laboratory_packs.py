@@ -72,6 +72,7 @@ __all__ = [
     "read_pack",
     "remove_pack",
     "section_problems",
+    "shipped_pack_directories",
     "shipped_pack_names",
 ]
 
@@ -251,9 +252,22 @@ def section_problems(document: object, where: str) -> list[str]:
 
 def shipped_pack_names() -> frozenset[str]:
     """The names of the domain packs that ship with the engine, which no laboratory pack takes."""
+    return frozenset(path.name for path in shipped_pack_directories())
+
+
+def shipped_pack_directories() -> list[Path]:
+    """The folder of each domain pack that ships with the engine, by name.
+
+    A pack is a folder of its own beside the package's modules. Python's ``__pycache__``, which
+    appears there once the package is imported, and any hidden folder are not packs.
+    """
     from ingence.dictionary.store import PACKS_DIRECTORY
 
-    return frozenset(path.name for path in PACKS_DIRECTORY.iterdir() if path.is_dir())
+    return sorted(
+        path
+        for path in PACKS_DIRECTORY.iterdir()
+        if path.is_dir() and not path.name.startswith(("_", "."))
+    )
 
 
 def check_pack(source: Path) -> InstalledPack:

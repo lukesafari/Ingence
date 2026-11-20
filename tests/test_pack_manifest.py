@@ -36,6 +36,7 @@ from ingence.dictionary.laboratory_packs import (
     fetch_pack,
     install_pack_from,
     installed_packs,
+    shipped_pack_directories,
 )
 from ingence.dictionary.pack_manifest import (
     MANIFEST_KEY,
@@ -45,7 +46,7 @@ from ingence.dictionary.pack_manifest import (
     with_manifest,
     words_digest,
 )
-from ingence.dictionary.store import PACKS_DIRECTORY, DictionaryStore
+from ingence.dictionary.store import DictionaryStore
 from ingence.record.log import append_event
 from ingence.record.questions import term_target
 from ingence.record.targets import sense_target
@@ -93,9 +94,7 @@ def project(tmp_path: Path) -> Project:
 # ------------------------------------------------------------------------------ the manifest
 
 
-@pytest.mark.parametrize(
-    "directory", sorted(path for path in PACKS_DIRECTORY.iterdir() if path.is_dir())
-)
+@pytest.mark.parametrize("directory", shipped_pack_directories())
 def test_every_shipped_pack_carries_a_manifest_whose_digest_matches_its_words(directory) -> None:
     (section,) = sorted(directory.glob("*.yaml"))
     document = yaml.safe_load(section.read_text(encoding="utf-8"))
@@ -114,7 +113,7 @@ def test_a_manifest_block_changes_nothing_a_run_reads(tmp_path: Path) -> None:
     without it."""
     from ingence.dictionary.store import load_sections
 
-    for directory in sorted(path for path in PACKS_DIRECTORY.iterdir() if path.is_dir()):
+    for directory in shipped_pack_directories():
         (section,) = sorted(directory.glob("*.yaml"))
         document = yaml.safe_load(section.read_text(encoding="utf-8"))
         bare = tmp_path / directory.name
