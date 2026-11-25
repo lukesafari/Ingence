@@ -167,9 +167,11 @@ def test_a_shipped_change_naming_a_rule_not_in_force_is_refused(tmp_path: Path) 
 
 
 def test_the_shipped_book_composes_revision_4_after_revisions_0_to_3() -> None:
-    book = shipped_rulebook()
-    # The shipped book is at revision 5, which ships from 0.4.0.
+    # The book at revision 5 ships from 0.4.0. A later shipped revision composes after it and is
+    # tested on its own, so this test reads the book as revision 5 left it.
+    book = effective_rulebook(load_revisions(), at=5)
     assert book.revision == 5
+    assert shipped_rulebook().revision >= book.revision
     declared = {
         rule["id"]
         for rule in REVISION["rules"]  # type: ignore[attr-defined]
@@ -428,7 +430,10 @@ def test_a_rule_change_committed_after_the_retired_file_keeps_applying(tmp_path:
     assert across is not None
     values = {spec.name: json.loads(spec.default) for spec in across.parameters}
     assert (values["derivations"], values["maximum_concepts"]) == ("each_deviation", 400)
-    assert across.version.startswith("3+p2")  # both changes, the later one's number
+    shipped = shipped_rulebook().by_id("group_resolved_across_experiments")
+    assert shipped is not None
+    # Both changes, the later one's number, on the version the shipped book holds.
+    assert across.version.startswith(f"{shipped.version.split('+')[0]}+p2")
 
 
 def test_infer_says_once_that_the_retired_file_is_no_longer_read(tmp_path: Path) -> None:
@@ -531,6 +536,8 @@ def test_every_rule_keeps_the_version_it_had_so_every_decision_still_applies(
         "pipeline_stage_from_name": ("2", "3"),
         "replicates_of_one_condition": ("1", "2"),
         "experiments_may_belong_together": ("3", "4"),
+        # Revision 6: the rules the invented laboratory's accuracy test asked for.
+        "derivation_by_a_scripts_calls": ("1", "2"),
     }
     for rule_id, (old, new) in raised_after.items():
         assert versions_before.pop(rule_id, None) in (old, f"{old}+d1"), rule_id

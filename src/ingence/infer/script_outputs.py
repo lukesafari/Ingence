@@ -32,18 +32,24 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from ingence.core.suffixes import is_extension
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 __all__ = [
     "LANGUAGES",
     "READ",
     "SCRIPT_FILE_NAMES_KEY",
+    "STEPS",
     "WRITTEN",
     "CalledName",
     "WrittenName",
     "names_called",
     "names_written",
+    "steps_of",
 ]
 
 LANGUAGES = ("imagej_macro", "python", "matlab")
@@ -136,6 +142,9 @@ WRITTEN = "written"
 #: The observation a script's read and written file names are recorded under, by the keyword
 #: extractor, as ``{"read": [...], "written": [...]}``; reference resolution reads it as mentions.
 SCRIPT_FILE_NAMES_KEY = "script.file_names"
+#: The key the same observation holds the calls' order under, from the extractor's version 2: a list
+#: of steps, each ``{"read": [...], "written": [...]}`` (:func:`steps_of`).
+STEPS = "steps"
 
 #: The parts of a variable's name that name a folder (``data_dir``, ``outputFolder``, ``dir``),
 #: read from its words split at underscores and capitals, so ``direction`` names none.
@@ -685,3 +694,26 @@ def _after_last_separator(pieces: list[str | None]) -> tuple[str | None, ...]:
             rest = piece[cut + 1 :]
             return tuple(([rest] if rest else []) + pieces[index + 1 :])
     return tuple(pieces)
+
+
+def steps_of(called: Sequence[CalledName]) -> list[dict[str, list[str]]]:
+    """A script's calls as steps, in the text's order: what each run of writes was made from.
+
+    A step is the files read since the last write, and the files written after them before the
+    next read. Writes in a row share the reads before them (a figure and its table, saved from one
+    frame), and a read after a write begins the next step's inputs. A write before any read is a
+    step with no inputs. Each list is sorted and holds a name once.
+    """
+    steps: list[dict[str, set[str]]] = []
+    current: dict[str, set[str]] = {READ: set(), WRITTEN: set()}
+    last = ""
+    for name in called:
+        if name.direction == READ and last == WRITTEN:
+            steps.append(current)
+            current = {READ: set(), WRITTEN: set()}
+        if name.direction in current:
+            current[name.direction].add(name.name)
+        last = name.direction
+    if current[READ] or current[WRITTEN]:
+        steps.append(current)
+    return [{direction: sorted(names) for direction, names in step.items()} for step in steps]

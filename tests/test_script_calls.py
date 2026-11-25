@@ -142,6 +142,7 @@ def test_a_dive_records_a_script_s_called_names_with_their_direction(tmp_path: P
     assert _reading(project, "analyse_kelt.py", "script.file_names") == {
         "read": ["kelt_counts.csv"],
         "written": ["kelt_plot.png"],
+        "steps": [{"read": ["kelt_counts.csv"], "written": ["kelt_plot.png"]}],
     }
 
 
@@ -360,7 +361,9 @@ def _records(entry_id: str, *classified: str) -> object:
     )
 
 
-def _resolved(target: str, direction: str, outcome: str = "in_folder") -> object:
+def _resolved(
+    target: str, direction: str, outcome: str = "in_folder", steps: tuple[int, ...] = ()
+) -> object:
     from ingence.infer.references import Mention, Resolution
 
     mention = Mention(
@@ -370,6 +373,7 @@ def _resolved(target: str, direction: str, outcome: str = "in_folder") -> object
         shape="bare",
         observation_id=f"obs:{direction}:{target}",
         direction=direction,
+        steps=steps,
     )
     return Resolution(mention=mention, outcome=outcome, target_id=target, answered=1)
 
@@ -558,3 +562,105 @@ def test_the_harder_calls_are_read_or_left_as_they_should_be() -> None:
     }
     matlab = "fprintf('%d\\n', x); im = imread('kelt_001.tif');\n"
     assert _called(matlab, "matlab") == {("kelt_001.tif", READ)}
+
+
+# ---------------------------------------------------------------------------
+# The calls read in order: each output made from its own step's inputs.
+# ---------------------------------------------------------------------------
+
+_TWO_STEPS = (
+    "import pandas as pd\n"
+    'first = pd.read_csv("kelt_counts.csv")\n'
+    'plt.savefig("kelt_plot.png")\n'
+    'first.to_csv("kelt_summary.csv")\n'
+    'second = pd.read_csv("vorn_counts.csv")\n'
+    'plt.savefig("vorn_plot.png")\n'
+)
+
+
+def test_a_script_s_calls_are_cut_into_steps_at_each_read_after_a_write() -> None:
+    """Writes in a row share the reads before them, and a read after a write starts a step."""
+    from ingence.infer.script_outputs import steps_of
+
+    assert steps_of(names_called(_TWO_STEPS, "python")) == [
+        {"read": ["kelt_counts.csv"], "written": ["kelt_plot.png", "kelt_summary.csv"]},
+        {"read": ["vorn_counts.csv"], "written": ["vorn_plot.png"]},
+    ]
+    # A write before any read is a step of its own, with no inputs.
+    early = 'plt.savefig("zib_blank.png")\ncounts = pd.read_csv("zib.csv")\n'
+    assert steps_of(names_called(early, "python")) == [
+        {"read": [], "written": ["zib_blank.png"]},
+        {"read": ["zib.csv"], "written": []},
+    ]
+
+
+def test_a_run_s_recorded_steps_reach_each_mention() -> None:
+    from ingence.infer.references import mentions_of
+    from ingence.infer.script_outputs import SCRIPT_FILE_NAMES_KEY, steps_of
+
+    called = names_called(_TWO_STEPS, "python")
+    value = json.dumps(
+        {
+            "read": ["kelt_counts.csv", "vorn_counts.csv"],
+            "written": ["kelt_plot.png", "kelt_summary.csv", "vorn_plot.png"],
+            "steps": steps_of(called),
+        }
+    )
+    mentions = mentions_of([("obs", "script", "script_calls", SCRIPT_FILE_NAMES_KEY, value)])
+    steps = {(mention.path, mention.direction): mention.steps for mention in mentions}
+    assert steps[("kelt_counts.csv", READ)] == (0,)
+    assert steps[("vorn_plot.png", WRITTEN)] == (1,)
+
+
+def test_one_step_pairs_an_output_only_with_its_own_step_s_inputs() -> None:
+    from ingence.rulebook.registry import PREDICATES
+
+    predicate = PREDICATES.get("derives_from_script_calls")
+    kelt = _resolved("kelt_counts.csv", READ, steps=(0,))
+    vorn = _resolved("vorn_counts.csv", READ, steps=(1,))
+    plot = _resolved("vorn_plot.png", WRITTEN, steps=(1,))
+    stepped = {**_SCRIPTS, "pairs_within": "one_step"}
+    assert predicate.evaluate(_drawn("vorn_counts.csv", "vorn_plot.png", vorn, plot), stepped)
+    across = _drawn("kelt_counts.csv", "vorn_plot.png", kelt, plot)
+    assert predicate.evaluate(across, stepped) is None
+    assert "writes something else between" in predicate.explain_abstention(across, stepped).reason
+    # The whole script, as version 1 read it, and a reading with no order, pair every input.
+    assert predicate.evaluate(across, {**_SCRIPTS, "pairs_within": "whole_script"})
+    unordered = _drawn(
+        "kelt_counts.csv",
+        "vorn_plot.png",
+        _resolved("kelt_counts.csv", READ),
+        _resolved("vorn_plot.png", WRITTEN),
+    )
+    assert predicate.evaluate(unordered, stepped)
+
+
+def test_a_script_of_two_steps_proposes_each_plot_from_its_own_table(tmp_path: Path) -> None:
+    from ingence.infer.run import run_inference
+    from ingence.storage.catalog import open_catalog
+
+    experiment = "2020-03-04 vorn kelt"
+    project = _dived(
+        tmp_path,
+        {
+            f"{experiment}/raw/kelt_001.nd2": "x",
+            f"{experiment}/analysis/analyse.py": _TWO_STEPS,
+            f"{experiment}/analysis/kelt_counts.csv": "a,b\n1,2\n",
+            f"{experiment}/analysis/vorn_counts.csv": "a,b\n3,4\n",
+            f"{experiment}/analysis/kelt_plot.png": "x",
+            f"{experiment}/analysis/kelt_summary.csv": "a,b\n1,2\n",
+            f"{experiment}/analysis/vorn_plot.png": "x",
+        },
+    )
+    run_inference(project, run_id="run_20260101T000003Z_333333333333", started_at="t")
+    with open_catalog(project.path) as catalog:
+        rows = catalog.query(
+            "SELECT s.name, t.name FROM candidates c JOIN entries s ON s.entry_id = c.source_id "
+            "JOIN entries t ON t.entry_id = c.target_id "
+            "WHERE c.rule_id = 'derivation_by_a_scripts_calls' ORDER BY 1, 2"
+        ).fetchall()
+    assert {(str(source), str(target)) for source, target in rows} == {
+        ("kelt_counts.csv", "kelt_plot.png"),
+        ("kelt_counts.csv", "kelt_summary.csv"),
+        ("vorn_counts.csv", "vorn_plot.png"),
+    }

@@ -8,6 +8,13 @@ script's own folder or experiment (:mod:`ingence.infer.references`). The grammar
 :func:`ingence.infer.script_outputs.names_called`. Nothing is executed, and a call
 the reading does not know is not read.
 
+Version 2 also records the calls' order as steps (``"steps"``, a list of ``{"read": [...],
+"written": [...]}`` in the text's order). A step is the files read since the last write, and the
+files written after them before the next read. A script that reads ``a.csv``, writes ``a.png``,
+then reads ``b.csv`` and writes ``b.png`` made ``a.png`` from ``a.csv`` and ``b.png`` from
+``b.csv``; the two lists alone say only that it read both and wrote both, and every output was
+paired with every input.
+
 This is an extractor of its own, declared for scripts' extensions only. Folded into the keyword
 extractor, it would raise that extractor's version and have every text file of a pool read
 again on the next dive, for readings that only a script can hold.
@@ -27,7 +34,14 @@ from ingence.extractors.base import EXTRACTORS, ExtractorResult, Isolation, Read
 from ingence.extractors.keywords import SCRIPT_LANGUAGES
 from ingence.extractors.limits import Limits
 from ingence.extractors.text import decide_encoding
-from ingence.infer.script_outputs import READ, SCRIPT_FILE_NAMES_KEY, WRITTEN, names_called
+from ingence.infer.script_outputs import (
+    READ,
+    SCRIPT_FILE_NAMES_KEY,
+    STEPS,
+    WRITTEN,
+    names_called,
+    steps_of,
+)
 
 if TYPE_CHECKING:
     from ingence.extractors.base import ExtractionContext
@@ -39,7 +53,7 @@ class ScriptCallsExtractor:
     """Records the files a script's read and write calls name by a literal name."""
 
     name = "script_calls"
-    version = "1"
+    version = "2"
     isolation = Isolation.IN_PROCESS
 
     def supports(self, context: ExtractionContext) -> bool:
@@ -62,10 +76,11 @@ class ScriptCallsExtractor:
         called = names_called(text, language)
         readings: tuple[Reading, ...] = ()
         if called:
-            named = {
+            named: dict[str, object] = {
                 direction: sorted({name.name for name in called if name.direction == direction})
                 for direction in (READ, WRITTEN)
             }
+            named[STEPS] = steps_of(called)
             readings = (
                 Reading(
                     SCRIPT_FILE_NAMES_KEY,
@@ -85,7 +100,7 @@ class ScriptCallsExtractor:
 
 @EXTRACTORS.register(
     "script_calls",
-    version="1",
+    version="2",
     summary="the files a script's read and write calls name by a literal name, with direction",
     attributes={"extensions": ",".join(sorted(SCRIPT_LANGUAGES))},
 )

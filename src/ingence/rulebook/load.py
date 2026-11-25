@@ -246,7 +246,7 @@ def _declared_in_python(*, scope: Scope) -> list[Revision]:
     Revision 4 is shipped with the engine. Its declaration stays one dict in its module, where
     its rules were written and tested, and composes after revisions 0 to 3 like any other.
     """
-    from ingence.rulebook import revision_4, revision_5
+    from ingence.rulebook import revision_4, revision_5, revision_6
 
     return [
         revision_from(revision_4.REVISION, name=Path(revision_4.__file__).name, scope=scope),
@@ -254,6 +254,9 @@ def _declared_in_python(*, scope: Scope) -> list[Revision]:
         # (reading, file types, names, workflows, areas and readouts), and it composes after
         # revision 4.
         revision_from(revision_5.REVISION, name="revision_5", scope=scope),
+        # Revision 6 holds the rules the invented laboratory's accuracy test asked for, one module
+        # per subject (stages, derivations, experiments), and it composes after revision 5.
+        revision_from(revision_6.REVISION, name="revision_6", scope=scope),
     ]
 
 

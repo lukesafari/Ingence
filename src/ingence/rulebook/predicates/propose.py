@@ -212,6 +212,13 @@ class DerivesFromDeclaredReference:
         )
 
 
+#: Where a script's pairs are read: every input with every output, or each output with the inputs
+#: of its own step.
+_WHOLE_SCRIPT = "whole_script"
+_ONE_STEP = "one_step"
+_PAIRS_WITHIN = (_WHOLE_SCRIPT, _ONE_STEP)
+
+
 class DerivesFromScriptCalls:
     """Propose a derivation where one script reads one file and writes the other.
 
@@ -231,12 +238,21 @@ class DerivesFromScriptCalls:
        resolved within its own folder or experiment only, and found by name there it is
        ``unique_basename``.
 
+    Where the rule says the pair is read within ``one_step`` (``pairs_within``, from version 2),
+    the source must be read in the same step of the script's calls as the target is written: after
+    the script's previous write and before the target's (:func:`~ingence.infer.script_outputs.
+    steps_of`). A script that reads ``a.csv``, writes ``a.png``, then reads ``b.csv`` and writes
+    ``b.png`` made ``b.png`` from ``b.csv`` and not from ``a.csv``. Read within ``whole_script``,
+    as version 1 read it and as a rule naming no ``pairs_within`` does, every file the script
+    reads is the source of every file it writes. A script read before its calls' order was
+    recorded is read whole, because its reading says nothing about order.
+
     This is testimony and not proof. The script states what it would do and not what a run did,
     which is why the rule proposes and never asserts. Nothing temporal is read.
     """
 
     name = "derives_from_script_calls"
-    version = "1"
+    version = "2"
 
     def evaluate(self, subject: object, parameters: Mapping[str, object]) -> object:
         """Return the support for the target written from the source by one script, or None."""
@@ -276,6 +292,8 @@ class DerivesFromScriptCalls:
             for end in ("source", "target")
         }
         called: dict[tuple[str | None, str], list[str]] = {}
+        steps: dict[tuple[str | None, str], set[int]] = {}
+        unordered = False
         below = False
         for resolution in getattr(subject, "resolutions", ()):
             direction = getattr(resolution.mention, "direction", "")
@@ -287,6 +305,9 @@ class DerivesFromScriptCalls:
             called.setdefault((resolution.target_id, direction), []).append(
                 resolution.mention.observation_id
             )
+            numbered = tuple(getattr(resolution.mention, "steps", ()))
+            steps.setdefault((resolution.target_id, direction), set()).update(numbered)
+            unordered = unordered or not numbered
         read = called.get((ends["source"], "read"), [])
         written = called.get((ends["target"], "written"), [])
         if not read or not written:
@@ -295,6 +316,23 @@ class DerivesFromScriptCalls:
             return "the script's calls do not read the source and write the target"
         if called.get((ends["source"], "written")) or called.get((ends["target"], "read")):
             return "the script reads and writes one of the two, which gives no direction"
+        within = str(parameters.get("pairs_within", _WHOLE_SCRIPT))
+        if within not in _PAIRS_WITHIN:
+            message = (
+                f"derives_from_script_calls reads a script's pairs within one of "
+                f"{', '.join(_PAIRS_WITHIN)}, and this rule names {within!r}"
+            )
+            raise PredicateNotEvaluableError(message)
+        if (
+            within == _ONE_STEP
+            and not unordered
+            and not steps.get((ends["source"], "read"), set())
+            & steps.get((ends["target"], "written"), set())
+        ):
+            return (
+                "the script reads the source and writes the target, but writes something else "
+                "between, so the target is made from what it read after that"
+            )
         return described, tuple(sorted(set(read))), tuple(sorted(set(written)))
 
 
@@ -1688,11 +1726,11 @@ def _build_derives_within_one_name_beside() -> Predicate:
 
 @declare(
     "derives_from_script_calls",
-    version="1",
+    version="2",
     summary="Propose derives where one script's calls read the source and write the target",
     effect=RuleEffect.PROPOSES,
     reads=Reads.PAIR,
-    parameters=("describing_formats", "minimum_resolution"),
+    parameters=("describing_formats", "minimum_resolution", "pairs_within"),
     support_families=("declared_reference",),
 )
 def _build_derives_from_script_calls() -> Predicate:

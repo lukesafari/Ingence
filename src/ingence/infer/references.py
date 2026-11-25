@@ -56,7 +56,7 @@ from ingence.extractors.mentions import (
     RELATIVE,
     lexical_shape,
 )
-from ingence.infer.script_outputs import READ, SCRIPT_FILE_NAMES_KEY, WRITTEN
+from ingence.infer.script_outputs import READ, SCRIPT_FILE_NAMES_KEY, STEPS, WRITTEN
 from ingence.scan.mention_shapes import (
     ABSOLUTE_FOREIGN,
     ABSOLUTE_LOCAL,
@@ -173,6 +173,10 @@ class Mention:
     #: Whether a script's call reads or writes the file: ``read``, ``written``, or empty for a
     #: path found in a file's text, which says neither.
     direction: str = ""
+    #: The steps of the script's calls the name is read or written in, counted from 0 in the text's
+    #: order (:func:`~ingence.infer.script_outputs.steps_of`). Empty where the reading recorded no
+    #: order: a path found in a file's text, or a script read by the calls extractor's version 1.
+    steps: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,6 +422,7 @@ def mentions_of(
             shapes[(entry_id, observer)] = dict(json.loads(value))
         elif key == SCRIPT_FILE_NAMES_KEY:
             named = dict(json.loads(value))
+            stepped = _steps_named(named.get(STEPS))
             called.extend(
                 Mention(
                     entry_id=entry_id,
@@ -426,6 +431,7 @@ def mentions_of(
                     shape=_called_shape(str(path)),
                     observation_id=observation_id,
                     direction=direction,
+                    steps=stepped.get((direction, str(path)), ()),
                 )
                 for direction in (READ, WRITTEN)
                 for path in sorted(set(named.get(direction, ())))
@@ -452,6 +458,20 @@ def mentions_of(
             ),
         )
     )
+
+
+def _steps_named(steps: object) -> dict[tuple[str, str], tuple[int, ...]]:
+    """Each called name's steps, by its direction and spelling, from a reading's ``steps``."""
+    found: dict[tuple[str, str], set[int]] = {}
+    if not isinstance(steps, list):
+        return {}
+    for number, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        for direction in (READ, WRITTEN):
+            for path in step.get(direction, ()) or ():
+                found.setdefault((direction, str(path)), set()).add(number)
+    return {named: tuple(sorted(numbers)) for named, numbers in found.items()}
 
 
 def _called_shape(path: str) -> str:

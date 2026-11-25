@@ -16,8 +16,9 @@ def test_revision_5_loads_and_numbers_itself_5() -> None:
     assert set(REVISION) == {"revision", "summary", "rules", "changes"}
     load_builtins()
     revisions = load_revisions()
-    assert [revision.number for revision in revisions][-2:] == [4, 5]
-    fifth = revisions[-1]
+    numbers = [revision.number for revision in revisions]
+    assert numbers[numbers.index(4) : numbers.index(4) + 2] == [4, 5]
+    fifth = revisions[numbers.index(5)]
     assert fifth.number == 5 and fifth.summary
     assert {rule.rule_id for rule in fifth.rules} == {
         rule["id"]
@@ -27,21 +28,24 @@ def test_revision_5_loads_and_numbers_itself_5() -> None:
 
 def test_revision_5_composes_after_revision_4_and_keeps_every_rule_it_does_not_supersede() -> None:
     """Every rule of revision 4 that revision 5 does not supersede is still in force beside
-    revision 5's own, and the shipped Rulebook is the whole."""
+    revision 5's own, at revision 5 and in the shipped Rulebook, which composes later revisions
+    after it."""
     load_builtins()
     revisions = load_revisions()
     at_four = effective_rulebook(revisions, at=4)
-    whole = effective_rulebook(revisions)
-    assert whole.revision == 5 and at_four.revision == 4
+    at_five = effective_rulebook(revisions, at=5)
+    assert at_five.revision == 5 and at_four.revision == 4
     superseded = {str(change.get("supersede")) for change in REVISION["changes"]}  # type: ignore[union-attr]
-    in_force = {rule.rule_id for rule in whole.rules}
+    in_force = {rule.rule_id for rule in at_five.rules}
     assert {rule.rule_id for rule in at_four.rules} - superseded <= in_force
     assert {rule["id"] for rule in REVISION["rules"]} <= in_force  # type: ignore[index]
-    assert shipped_rulebook().digest == whole.digest
+    assert {rule.rule_id for rule in at_five.rules} <= {
+        rule.rule_id for rule in shipped_rulebook().rules
+    }
     if REVISION["rules"] or REVISION["changes"]:
-        assert whole.digest != at_four.digest
+        assert at_five.digest != at_four.digest
     else:
-        assert whole.digest == at_four.digest
+        assert at_five.digest == at_four.digest
 
 
 def test_each_revision_5_module_declares_its_lists_and_has_a_docstring() -> None:
