@@ -72,7 +72,7 @@ def _build(base: Path, words_as: Literal["terms", "spellings"]) -> Path:
             occurred_at="2026-01-02T00:00:00Z",
             target=f"term:{word}",
             against_run_id=CENSUS,
-            payload={"raised": word, "answer": "quen_stain", "theme_kind": "reagent"},
+            payload={"raised": word, "answer": "quen_stain", "theme_kind": "subject"},
             scope=PROJECT_SCOPE,
         )
     run_census(

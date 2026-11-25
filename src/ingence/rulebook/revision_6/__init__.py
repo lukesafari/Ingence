@@ -17,7 +17,7 @@ The revision is a package with one module for each topic. Each module exports ``
 - :mod:`~ingence.rulebook.revision_6.derivations`: a script's inputs and outputs read step by
   step, and the bound on the files one file names;
 - :mod:`~ingence.rulebook.revision_6.experiments`: an instrument's metadata in an experiment
-  folder's count.
+  folder's count, and the words the related-experiments questions are built from.
 
 :func:`ingence.rulebook.load.load_revisions` loads the revision after revision 5.
 """
@@ -35,8 +35,9 @@ REVISION: dict[str, object] = {
     "revision": 6,
     "summary": (
         "The rules the invented laboratory's accuracy test asked for: a folder's stage, an "
-        "instrument's metadata, a script's calls read step by step, replicates kept apart, and "
-        "the bound on named files. Supersedes what it changes and edits nothing earlier."
+        "instrument's metadata, a script's calls read step by step, replicates kept apart, the "
+        "bound on named files, and the words that relate experiments. Supersedes what it "
+        "changes and edits nothing earlier."
     ),
     "changes": [change for track in _TRACKS for change in track.CHANGES],
     "rules": [rule for track in _TRACKS for rule in track.RULES],

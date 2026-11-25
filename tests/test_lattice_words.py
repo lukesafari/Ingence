@@ -70,13 +70,14 @@ def _say(project: Path, target: str, kind: RecordEventKind, payload: dict[str, A
 
 
 def _teach_one_thing(project: Path) -> None:
-    """A person says ``brisa`` and ``brisal`` are one thing, ``brisa_stain`` (a reagent)."""
+    """A person says ``brisa`` and ``brisal`` are one thing, ``brisa_stain`` (a subject: since
+    revision 6 the questions leave a reagent's word out)."""
     for word, kind in (("brisa", RecordEventKind.DEFINE), ("brisal", RecordEventKind.ASSIGN)):
         _say(
             project,
             f"term:{word}",
             kind,
-            {"raised": word, "answer": "brisa_stain", "theme_kind": "reagent"},
+            {"raised": word, "answer": "brisa_stain", "theme_kind": "subject"},
         )
 
 
@@ -169,7 +170,7 @@ def test_a_stored_answer_is_read_in_the_words_the_lattice_holds() -> None:
 
 
 def test_a_word_the_run_writes_as_a_spelling_stays_itself_even_when_it_is_a_terms_name() -> None:
-    """A reagent term written as its own name and as a short form: an answer naming the name is
+    """A subject's term written as its own name and as a short form: an answer naming the name is
     about that spelling alone, never about the short form too (it would approve a core nobody
     approved)."""
     rows = [("gfp", "gfp", 3), ("egfp", "gfp", 2), ("dapi", "dapi", 1)]
@@ -218,7 +219,7 @@ def test_the_runs_written_words_are_read_from_its_names_bound_or_not(tmp_path: P
             project.path,
             f"term:{word}",
             kind,
-            {"raised": word, "answer": "kelt", "theme_kind": "reagent"},
+            {"raised": word, "answer": "kelt", "theme_kind": "subject"},
         )
     run_census(
         Project.open(project.path), run_id=REBOUND, started_at="2026-01-01T00:00:02Z", rebind=True
@@ -302,7 +303,7 @@ def test_under_spellings_an_approval_and_a_decline_name_only_the_cores_they_say(
             project.path,
             f"term:{word}",
             kind,
-            {"raised": word, "answer": "brisa", "theme_kind": "reagent"},
+            {"raised": word, "answer": "brisa", "theme_kind": "subject"},
         )
     run_census(
         Project.open(project.path), run_id=REBOUND, started_at="2026-01-01T00:00:02Z", rebind=True

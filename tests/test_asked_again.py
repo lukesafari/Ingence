@@ -41,7 +41,8 @@ DEVIATION_RULE = "group_resolution_deviation"
 PERSON = "dana (an invented person)"
 MOMENT = "2026-01-01T00:00:30Z"
 
-#: ``kelt`` and ``brisa`` are taught as the reagents ``kelt_line`` and ``brisa_stain``.
+#: ``kelt`` and ``brisa`` are taught as the subjects ``kelt_line`` and ``brisa_stain``: a word the
+#: related-experiments questions read, as a reagent's is not since revision 6.
 TAUGHT = (("kelt", "kelt_line"), ("brisa", "brisa_stain"))
 
 
@@ -79,7 +80,7 @@ def _project(base: Path, words_as: Literal["terms", "spellings"]) -> Project:
             occurred_at="2026-01-01T00:00:10Z",
             target=f"term:{word}",
             against_run_id=CENSUS,
-            payload={"raised": word, "answer": term, "theme_kind": "reagent"},
+            payload={"raised": word, "answer": term, "theme_kind": "subject"},
             scope=PROJECT_SCOPE,
         )
     run_census(

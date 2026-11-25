@@ -1,4 +1,5 @@
-"""Revision 6, experiments: where one experiment's material is bound together.
+"""Revision 6, experiments: where one experiment's material is bound together, and which words
+say which experiments belong together.
 
 - ``experiment_folder_from_contents`` v4: an instrument's metadata beside an acquisition, named
   as the acquisition but for the extension (``A549_001.xml`` beside ``A549_001.nd2``), is part of
@@ -6,11 +7,17 @@
   file as an analysis of its movie, so a folder of movies and their metadata held "acquisitions and
   files named for them" and was called an experiment: all 36 folders it wrongly called one on the
   invented laboratory's middle collection were such folders.
+- ``group_resolved_across_experiments`` v4: the related-experiments questions are built from the
+  words that say what an experiment is about. A word matched to a condition, a technique, an
+  acquisition setting, a reagent, a file's role, a channel or an instrument is not a term, as
+  stage and replicate words were not (``ignored_theme_kinds``). Experiments sharing a technique or
+  a treatment are not one project's: on the middle collection, 8,408 of the 9,398 pairs the
+  questions proposed were wrong, most of them groups named by such a word.
 """
 
 from __future__ import annotations
 
-from ingence.rulebook.revision_6.earlier import declared_in_revision_4
+from ingence.rulebook.revision_6.earlier import declared_in_revision_4, parameter_of
 
 __all__ = ["CHANGES", "RULES"]
 
@@ -55,8 +62,43 @@ def _experiment_from_contents() -> dict[str, object]:
     return rule
 
 
+#: The kinds whose words say how, with what or under which condition an experiment was done, and
+#: never what it is about. Stage, replicate and connecting words were left out before.
+_HOW_AN_EXPERIMENT_WAS_DONE = [
+    "stage",
+    "replicate",
+    "connective",
+    "condition",
+    "technique",
+    "acquisition",
+    "reagent",
+    "file_role",
+    "channel",
+    "instrument",
+]
+
+
+def _resolved_across_experiments() -> dict[str, object]:
+    rule = declared_in_revision_4("group_resolved_across_experiments")
+    rule["version"] = "4"
+    ignored = parameter_of(rule, "ignored_theme_kinds")
+    ignored["default"] = _HOW_AN_EXPERIMENT_WAS_DONE
+    ignored["description"] = (
+        "A word matched to a sense of these kinds is not a term: it says how, with what or under "
+        "which condition an experiment was done, and not what it is about."
+    )
+    rule["rationale"] = (
+        f"{rule['rationale']} Version 4 leaves out the words that say how an experiment was done. "
+        "Two experiments imaged by one technique, or given one drug, are not one project's, and "
+        "a question naming such a word joined experiments nobody would put together: on the "
+        "invented laboratory's middle collection, about nine in ten of the pairs the questions "
+        "proposed. It asks about fewer groups, and so finds fewer of the right ones."
+    )
+    return rule
+
+
 #: The rules this module declares, each a dict shaped like revision 4's.
-RULES: list[dict[str, object]] = [_experiment_from_contents()]
+RULES: list[dict[str, object]] = [_experiment_from_contents(), _resolved_across_experiments()]
 
 #: What this module changes in rules an earlier revision declared: nothing. A rule declared again
 #: at a higher version displaces the earlier one by its version.

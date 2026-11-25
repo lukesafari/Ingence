@@ -33,6 +33,23 @@ def built(tmp_path_factory: pytest.TempPathFactory) -> TopicProject:
     return build_topic_project(tmp_path_factory.mktemp("topics_words"))
 
 
+def _keep_technique_words(project: Path) -> None:
+    """Read a technique's word as a term of the groups, as before revision 6.
+
+    The bound word under test (``epifluorescence``) is a technique's. Since revision 6 the groups
+    leave such a word out, and a project that wants its groups named by technique says so, as this
+    one does, through the rule's own parameter.
+    """
+    from fixtures.revision_4 import tune
+
+    tune(
+        project,
+        "ignored_theme_kinds",
+        ["stage", "replicate", "connective"],
+        rules=("group_resolved_across_experiments",),
+    )
+
+
 def _carrying(built: TopicProject, *words: str) -> set[str]:
     return {
         built.ids[unit]
@@ -73,6 +90,7 @@ def test_a_core_finds_its_experiments_under_either_reading_of_a_bound_word(
     opened = opened.save_settings(
         opened.settings.model_copy(update={"groups": GroupSettings(words_as=words_as)})
     )
+    _keep_technique_words(copy)
     # The reading is the run's own (the setting it was bound by, from its journal): a change of the
     # setting waits for the next run.
     from ingence.grouping.lattice_words import run_words_as
@@ -149,6 +167,7 @@ def test_a_core_with_a_two_word_term_is_written_and_resolves(
     opened = opened.save_settings(
         opened.settings.model_copy(update={"groups": GroupSettings(words_as=words_as)})
     )
+    _keep_technique_words(copy)
     run_inference(opened, run_id="run_20260101T000007Z_ffffffffffff", started_at="t")
     with open_catalog(copy) as catalog:
         assert run_words_as(catalog) == words_as

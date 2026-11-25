@@ -528,7 +528,7 @@ def test_every_rule_keeps_the_version_it_had_so_every_decision_still_applies(
         # A bound word is its Dictionary term in the lattice (``groups.words_as``), and a stored
         # approval is read in the words the lattice holds.
         "group_resolved_within_experiment": ("2", "3"),
-        "group_resolved_across_experiments": ("2", "3"),
+        "group_resolved_across_experiments": ("2", "4"),
         "group_resolution_deviation": ("2", "3"),
         # 0.4.0: a read file is recorded data. A stage word is read only where it stands alone in
         # a name. One file at two steps is not a replicate of itself.

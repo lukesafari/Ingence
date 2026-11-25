@@ -133,6 +133,19 @@ def test_the_metadata_beside_an_acquisition_is_found_by_name_alone() -> None:
     assert stem_of("notes", None) == "notes"
 
 
+def test_the_related_experiments_leave_out_how_an_experiment_was_done() -> None:
+    from ingence.rulebook import shipped_rulebook
+    from ingence.rulebook.render import value_in_force
+
+    rule = shipped_rulebook().by_id("group_resolved_across_experiments")
+    assert rule is not None
+    ignored = next(
+        value_in_force(spec) for spec in rule.parameters if spec.name == "ignored_theme_kinds"
+    )
+    assert {"stage", "replicate", "condition", "technique", "reagent"} <= set(ignored)
+    assert "subject" not in ignored, "a cell line or a target is what an experiment is about"
+
+
 def test_two_replicates_files_are_never_one_made_from_the_other(tmp_path) -> None:
     """``rep1`` and ``rep2`` are replicates' labels the Dictionary knows: the identity rule leaves
     the two files apart, and still pairs a file carrying no label with either."""
