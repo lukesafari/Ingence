@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING
 
 from ingence.core.schema import Claim, RuleEffect, SupportComponent
 from ingence.core.tiers import ResolutionStatus
+from ingence.dictionary.discover import INDEX_LABEL_CONSTRAINT
+from ingence.dictionary.normalize import split_indexed
 from ingence.rulebook.predicates.series import (
     CLOCK_TOLERANCE_SECONDS,
     SeriesReading,
@@ -794,16 +796,23 @@ class DerivesWithinANameIdentity:
     file named for the acquisition. A stage step that agrees with the time corroborates
     (``stage_step``). A stage step that disagrees is raised for a person and never reverses the
     pair.
+
+    Two replicates' files are never one made from the other, where the rule says so
+    (``apart_when_replicates_differ``, from version 4): both names carry a replicate's label
+    (``R1``, ``rep2``) and the labels differ. The identity leaves the label out, so that a file
+    pooling the replicates (``X_processed.tif`` beside ``X_raw_rep1.tif``) is one identity with
+    each, and that pair is still proposed.
     """
 
     name = "derives_within_a_name_identity"
-    version = "3"
+    version = "4"
 
     def __init__(self) -> None:
-        # Each member's clocks and folder, read once per class.
+        # Each member's clocks, folder and replicate labels, read once per class.
         self._class: tuple[object, ...] | None = None
         self._clocks: dict[str, _Clocks] = {}
-        self._sorted: dict[str, list[tuple[int, str]]] = {}
+        self._sorted: dict[str, list[tuple[int, str, str]]] = {}
+        self._labels: dict[str, frozenset[tuple[str, int]]] = {}
 
     def evaluate(self, subject: object, parameters: Mapping[str, object]) -> object:
         """Return the support for the pair, directed or undirected as the rule asks, or None."""
@@ -821,6 +830,17 @@ class DerivesWithinANameIdentity:
         cheap = _refused_before_time(subject, parameters)
         if cheap is not None:
             return cheap
+        apart = parameters.get("apart_when_replicates_differ", False) is True
+        labels: frozenset[tuple[str, int]] | None = None
+        if apart:
+            source = _replicate_labels(getattr(subject, "source", None))
+            target = _replicate_labels(getattr(subject, "target", None))
+            if source and target and source != target:
+                return (
+                    "the two files are two replicates' (their replicate labels differ), and no "
+                    "replicate is made from another"
+                )
+            labels = source or target
         if parameters.get("across_folders_only", False) is True and _one_folder(subject):
             return (
                 "two files of one folder sharing a name identity are siblings, and time alone "
@@ -846,7 +866,7 @@ class DerivesWithinANameIdentity:
             if parameters.get("across_folders_only", False) is True
             else None
         )
-        if order.direction > 0 and self._made_between(order, _tolerance(parameters), home):
+        if order.direction > 0 and self._made_between(order, _tolerance(parameters), home, labels):
             return (
                 "another file of the identity was made after the source and before the target, so "
                 "the chain is proposed link by link"
@@ -876,32 +896,69 @@ class DerivesWithinANameIdentity:
 
         clocks: dict[str, _Clocks] = {}
         folders: dict[str, str] = {}
+        labels: dict[str, frozenset[tuple[str, int]]] = {}
         for member in members:
             entry = getattr(member, "entry", None)
             if entry is not None:
                 clocks[str(entry.entry_id)] = credible_clocks(entry)
                 folders[str(entry.entry_id)] = str(entry.parent_entry_id or "")
-        self._class, self._clocks = members, clocks
+                labels[str(entry.entry_id)] = _replicate_labels(member)
+        self._class, self._clocks, self._labels = members, clocks, labels
         self._sorted = {
             kind: sorted(
-                (held[at][0], folders[identifier])  # type: ignore[index]
+                (held[at][0], folders[identifier], identifier)  # type: ignore[index]
                 for identifier, held in clocks.items()
                 if held[at] is not None
             )
             for at, kind in ((0, "content"), (1, "filesystem"))
         }
 
-    def _made_between(self, order: _Order, tolerance: int, home: str | None) -> bool:
+    def _made_between(
+        self,
+        order: _Order,
+        tolerance: int,
+        home: str | None,
+        labels: frozenset[tuple[str, int]] | None = None,
+    ) -> bool:
         """Whether a member's clock of the order's kind lies between the two ends', beyond the
-        tolerance on each side, in another folder than ``home`` where one is given."""
+        tolerance on each side, in another folder than ``home`` where one is given.
+
+        Where ``labels`` are given, the ends' replicate, a member of another replicate is not
+        between them: it is a step of that replicate's chain, not of theirs."""
         held = self._sorted.get(order.kind, [])
-        at = bisect.bisect_right(held, (order.source + tolerance, "\uffff"))
-        for instant, folder in held[at:]:
+        at = bisect.bisect_right(held, (order.source + tolerance, "\uffff", "\uffff"))
+        for instant, folder, identifier in held[at:]:
             if instant >= order.target - tolerance:
                 return False
+            other = self._labels.get(identifier, frozenset())
+            if labels and other and other != labels:
+                continue
             if home is None or folder != str(home):
                 return True
         return False
+
+
+def _replicate_labels(records: object) -> frozenset[tuple[str, int]]:
+    """The replicate labels a name carries, each its sense and its number: ``R2`` is
+    ``("replicate", 2)``. A label is read where the Dictionary bound its letters to a replicate's
+    sense under the indexed label's restriction, and its number is the indexed atom's own."""
+    values = {
+        component.component_id: component.normalized_value
+        for component in getattr(records, "components", ())
+        if component.component_type == "indexed"
+    }
+    found: set[tuple[str, int]] = set()
+    for binding in getattr(records, "bindings", ()):
+        if (
+            binding.constraint != INDEX_LABEL_CONSTRAINT
+            or binding.resolution_status is not ResolutionStatus.RESOLVED
+            or binding.term is None
+        ):
+            continue
+        split = split_indexed(values.get(binding.component_id, ""))
+        if split is not None:
+            found.add((binding.term, split[1]))
+    return frozenset(found)
 
 
 #: How far apart two credible times must be before one orders a pair, where a rule says nothing:
@@ -1676,12 +1733,13 @@ def _build_derives_from_named_acquisition() -> Predicate:
 
 @declare(
     "derives_within_a_name_identity",
-    version="3",
+    version="4",
     summary="Propose derives between two files of one name identity, the earlier as the source",
     effect=RuleEffect.PROPOSES,
     reads=Reads.PAIR,
     parameters=(
         "across_folders_only",
+        "apart_when_replicates_differ",
         "direction",
         "ordered_by_time",
         "stage_transitions",

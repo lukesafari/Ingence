@@ -506,7 +506,7 @@ def test_every_rule_keeps_the_version_it_had_so_every_decision_still_applies(
     # Raised after the fold: each changed its meaning, so each is a new version, and a decision on
     # the old one belongs to the old one. Every other rule keeps the version the fold froze.
     raised_after = {
-        "derivation_within_name_identity": ("4", "7"),
+        "derivation_within_name_identity": ("4", "8"),
         "derivation_named_for_an_acquisition": ("1", "6"),
         # A file whose whole name another's holds keys a group of its own.
         "named_for_an_acquisition": ("1", "2"),

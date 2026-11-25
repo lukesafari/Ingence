@@ -1,9 +1,18 @@
-"""Revision 6, derivations: which of a script's inputs made which of its outputs.
+"""Revision 6, derivations: which of a script's inputs made which of its outputs, and which files
+of one name are made from one another.
 
 - ``derivation_by_a_scripts_calls`` v2: each file a script writes is made from the files it read in
   the same step of its calls, after its previous write (``pairs_within``). Version 1 paired every
   file a script reads with every file it writes. On the invented laboratory's middle collection
   that was 4,239 wrong derivations beside 737 right ones, and reading by step kept every right one.
+- ``derivation_within_name_identity`` v8: two files of one name identity whose replicate labels
+  differ (``X-R1-proc.tif`` and ``X-R2-analysis.mat``) are never one made from the other
+  (``apart_when_replicates_differ``), and another replicate's file made between two of one
+  replicate is not a step between them. The identity leaves a replicate's label out, so a pooled
+  file (``X_processed.tif``) is still one identity with each replicate it pools; and two
+  replicates' files were too. On the invented laboratory's two middle collections the identity's
+  wrong derivations went from 92 and 62 to none, and its right ones from 709 and 816 to 802 and
+  878.
 """
 
 from __future__ import annotations
@@ -54,8 +63,47 @@ def _scripts_calls() -> dict[str, object]:
     return rule
 
 
+def _within_name_identity() -> dict[str, object]:
+    rule = declared_in_revision_4("derivation_within_name_identity")
+    rule["version"] = "8"
+    statement = str(rule["statement"])
+    held = "nor where one is the recording the other is named for"
+    if held not in statement:
+        message = "derivation_within_name_identity v7 no longer says what it leaves out"
+        raise ValueError(message)
+    rule["statement"] = statement.replace(
+        held,
+        "nor where both carry a replicate's label and the labels differ (only so: "
+        f"{{apart_when_replicates_differ}}), {held}",
+        1,
+    )
+    rule["rationale"] = (
+        f"{rule['rationale']} Version 8 keeps two replicates apart. The identity leaves a "
+        "replicate's label out, so that a file pooling replicates is one identity with each of "
+        "them; and so replicate 1's processed image and replicate 2's analysis were one identity "
+        "too, and proposed as one made from the other, which no replicate is."
+    )
+    rule["parameters"] = [
+        *_parameters(rule),
+        {
+            "name": "apart_when_replicates_differ",
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Whether two files whose names both carry a replicate's label, and different "
+                "ones, are left apart. A file carrying none, such as one pooling the replicates, "
+                "is still paired."
+            ),
+        },
+    ]
+    return rule
+
+
 #: The rules this module declares, each a dict shaped like revision 4's.
-RULES: list[dict[str, object]] = [_scripts_calls()]
+RULES: list[dict[str, object]] = [
+    _scripts_calls(),
+    _within_name_identity(),
+]
 
 #: What this module changes in rules an earlier revision declared: nothing. A rule declared again
 #: at a higher version displaces the earlier one by its version.

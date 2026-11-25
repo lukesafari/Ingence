@@ -35,8 +35,8 @@ REVISION: dict[str, object] = {
     "revision": 6,
     "summary": (
         "The rules the invented laboratory's accuracy test asked for: a folder's stage, an "
-        "instrument's metadata, and a script's calls read step by step. Supersedes what it "
-        "changes and edits nothing earlier."
+        "instrument's metadata, a script's calls read step by step, and replicates kept apart. "
+        "Supersedes what it changes and edits nothing earlier."
     ),
     "changes": [change for track in _TRACKS for change in track.CHANGES],
     "rules": [rule for track in _TRACKS for rule in track.RULES],
