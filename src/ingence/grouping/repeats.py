@@ -2,7 +2,11 @@
 
 Each experiment gets a signature. It holds the words of the experiment folder's own name, read as
 the clustering rule reads them (``experiment_terms`` with ``term_source`` ``folder_name``: every
-word not bound to a kind that says how rather than what, with digits and short words left out). It
+word not bound to a kind that says how rather than what, with digits and short words left out),
+and every name holding a digit that the Dictionary binds to such a sense: a cell line or a protein
+written with a number (``HepG2``, ``RPE1``, ``Rab5``) names what the experiment is about, and
+leaving it out made ``HepG2 CTCF`` a repeat of ``RPE1 CTCF``. A label the Dictionary does not know
+(``part2``) is left out as before. It
 also holds the formats that the experiment's instruments wrote. These are the formats in which the
 format rule (``acquisition_stage_from_format``) concluded acquisitions, and never any other stage
 claim. Experiments with the same signature that began on different days repeat each other.
@@ -209,6 +213,9 @@ def experiment_signatures(catalog: Catalog, run: RunUnits | None = None) -> dict
         },
         units={unit: unit for unit in experiments},
         folders={record.entry.entry_id: record for record in records},
+        # A cell line or a protein written with a number (HepG2, RPE1, Rab5) is what the
+        # experiment is about, so two folders differing there are not one experiment again.
+        bound_labels_as_words=True,
     )
     _registered(catalog, held)
     try:

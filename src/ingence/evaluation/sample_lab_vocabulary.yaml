@@ -74,6 +74,12 @@ terms:
   HEK293T: [hek293, subject]
   U2OS: [u2os, subject]
   COS7: [cos7, subject]
+  # Read since the biochemistry pack's version 4 (Cellosaurus).
+  HepG2: [hepg2, subject]
+  RPE1: [rpe1, subject]
+  NIH3T3: [nih3t3, subject]
+  A549: [a549, subject]
+  MCF7: [mcf7, subject]
   # drugs
   DMSO: [dimethyl_sulfoxide, reagent]
   nocodazole: [nocodazole, reagent]

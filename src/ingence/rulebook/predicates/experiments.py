@@ -799,7 +799,9 @@ class AnswerReader:
         return self._map
 
 
-def _words(held: EntryRecords, *, ignored: frozenset[str], minimum: int) -> frozenset[str]:
+def _words(
+    held: EntryRecords, *, ignored: frozenset[str], minimum: int, labels: bool = False
+) -> frozenset[str]:
     """The words a name holds, less a word bound to a sense of an ignored kind.
 
     A date's or a replicate's word is never a term, whatever the rule declares. Groups are not made
@@ -809,10 +811,16 @@ def _words(held: EntryRecords, *, ignored: frozenset[str], minimum: int) -> froz
 
     A bound word is its Dictionary term (``groups.words_as``), so two spellings that a person
     called one thing are one word to the lattice. An unbound word stays its spelling.
+
+    With ``labels``, a name holding a digit that the Dictionary bound to a sense of a kind not left
+    out is its term: a word (``U2OS``) or a letter glued to a number read whole (``HepG2``,
+    ``Rab5``). A cell line or a protein is written so, and a folder's name that differs from
+    another only there names another subject. A label the Dictionary bound to no sense
+    (``part2``) says nothing about what it counts, and is never one.
     """
     left_out = _left_out(held, ignored | NOT_GROUP_WORD_KINDS)
     terms = _terms_of(held)
-    return frozenset(
+    found = {
         lattice_word(
             component.normalized_value,
             terms.get(component.component_id),
@@ -822,9 +830,26 @@ def _words(held: EntryRecords, *, ignored: frozenset[str], minimum: int) -> froz
         if component.component_type == "word"
         and len(component.normalized_value) >= minimum
         and component.component_id not in left_out
-        # A word holding a digit is a label (a movie's glued number), never a condition.
-        and not _DIGIT.search(component.normalized_value)
-    )
+        # A word holding a digit is a label (a movie's glued number), never a condition, unless
+        # the Dictionary named what it is.
+        and (
+            not _DIGIT.search(component.normalized_value)
+            or (labels and terms.get(component.component_id) is not None)
+        )
+    }
+    if labels:
+        found.update(
+            lattice_word(
+                component.normalized_value,
+                terms.get(component.component_id),
+                words_as=held.words_as,
+            )
+            for component in held.components
+            if component.component_type == "indexed"
+            and terms.get(component.component_id) is not None
+            and component.component_id not in left_out
+        )
+    return frozenset(found)
 
 
 def experiment_terms(
@@ -833,6 +858,7 @@ def experiment_terms(
     *,
     units: Mapping[str, str] | None = None,
     folders: Mapping[str, EntryRecords] | None = None,
+    bound_labels_as_words: bool = False,
 ) -> tuple[dict[str, frozenset[str]], dict[str, str], dict[str, frozenset[str]]]:
     """Each experiment's terms, the experiment each entry lies in, and each file's own words.
 
@@ -848,7 +874,8 @@ def experiment_terms(
     word shorter than ``minimum_word_characters``, one holding a digit (a movie's glued label), and
     one bound to a sense of an ``ignored_theme_kinds`` kind (a stage or a replicate word: ``Drift``,
     ``rep``) is not a term. Dates and numbers are not words, so two days of one experiment hold
-    one set.
+    one set. With ``bound_labels_as_words``, a name holding a digit that the Dictionary bound to a
+    sense is a term (:func:`_words`); no rule asks for it, and the repeats do.
     """
     if units is None or folders is None:
         units, folders = experiment_folders(entries, parameters)
@@ -859,12 +886,13 @@ def experiment_terms(
     ignored = frozenset(str(kind) for kind in _names(parameters.get("ignored_theme_kinds")))
     acquiring = frozenset(_names(parameters.get("acquisition_rules")))
     minimum = int(str(parameters.get("minimum_word_characters", 2)))
+    labels = bound_labels_as_words
     unit_of_folder = {entry_id: entry_id for entry_id in units}
     terms: dict[str, set[str]] = {entry_id: set() for entry_id in units}
     for entry_id in units:
         held = folders.get(entry_id)
         if held is not None:
-            terms[entry_id].update(_words(held, ignored=ignored, minimum=minimum))
+            terms[entry_id].update(_words(held, ignored=ignored, minimum=minimum, labels=labels))
     placed: dict[str, str] = {}
     words_of: dict[str, frozenset[str]] = {}
     nearest: dict[str | None, str | None] = {}
@@ -876,7 +904,7 @@ def experiment_terms(
             continue
         placed[entry.entry_id] = key
         if entry.entry_type in (EntryType.FILE, EntryType.SYMLINK):
-            found = _words(held, ignored=ignored, minimum=minimum)
+            found = _words(held, ignored=ignored, minimum=minimum, labels=labels)
             words_of[entry.entry_id] = found
             if source == "folder_and_files" or (
                 source == "folder_and_acquisitions"

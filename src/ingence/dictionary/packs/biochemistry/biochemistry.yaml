@@ -10,12 +10,12 @@
 # new version and a new digest.
 pack:
   name: biochemistry
-  version: "3"
+  version: "4"
   domain: biochemistry
   author: Ingence
   licence: MIT
   schema: "1.22"
-  digest: 6d106581d1730883eda17200703093a3
+  digest: 88c8f2a242f1024ec901d79c3949bd02
 section: biochemistry
 theme_kind: technique
 origin: builtin
@@ -196,6 +196,19 @@ entries:
   - {term: cho, canonical: CHO, theme_kind: subject,
      surfaces: ["chinese hamster ovary", "cho cell", "cho k1"],
      ontology_ids: ["Cellosaurus:CVCL_0213", "Cellosaurus:CVCL_0214"]}
+  # A line written with its number glued on (`HepG2`, `RPE1`) is spelled whole and spelled as the
+  # tokeniser cuts it, so either reading of the name reaches the sense.
+  - {term: hepg2, canonical: Hep-G2, theme_kind: subject, surfaces: [hepg2, "hep g2", "hepg 2"],
+     ontology_ids: ["Cellosaurus:CVCL_0027"]}
+  # RPE1 is the hTERT-immortalised line laboratories mean by it.
+  - {term: rpe1, canonical: hTERT RPE-1, theme_kind: subject, surfaces: [rpe1, "rpe 1"],
+     ontology_ids: ["Cellosaurus:CVCL_4388"]}
+  - {term: nih3t3, canonical: NIH 3T3, theme_kind: subject,
+     surfaces: [nih3t3, "nih 3t3", "nih 3 t 3"], ontology_ids: ["Cellosaurus:CVCL_0594"]}
+  - {term: a549, canonical: A-549, theme_kind: subject, surfaces: [a549, "a 549"],
+     ontology_ids: ["Cellosaurus:CVCL_0023"]}
+  - {term: mcf7, canonical: MCF-7, theme_kind: subject, surfaces: [mcf7, "mcf 7"],
+     ontology_ids: ["Cellosaurus:CVCL_0031"]}
 
   # Drugs and reagents (ChEBI, PubChem). `chx` is cycloheximide's usual short form and is shipped as
   # nothing else.

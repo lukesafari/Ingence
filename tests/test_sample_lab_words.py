@@ -93,6 +93,12 @@ BIOLOGY_WORDS_NOW_READ = frozenset(
         "HEK293T",
         "HeLa",
         "U2OS",
+        # Since the biochemistry pack's version 4.
+        "A549",
+        "HepG2",
+        "MCF7",
+        "NIH3T3",
+        "RPE1",
         "DMSO",
         "cycloheximide",
         "nocodazole",
