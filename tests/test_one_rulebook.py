@@ -540,6 +540,7 @@ def test_every_rule_keeps_the_version_it_had_so_every_decision_still_applies(
         "derivation_by_a_scripts_calls": ("1", "2"),
         "stage_inherited_from_folder": ("1", "2"),
         "candidate_generation_is_bounded": ("1", "2"),
+        "indexed_label_may_mark_replicates": ("1", "2"),
     }
     # New at revision 6, so it stood in no book before the fold.
     assert versions_after.pop("metadata_stage_from_its_acquisition") == "1"

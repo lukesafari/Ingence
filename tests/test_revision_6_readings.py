@@ -5,6 +5,8 @@ invented.
   a file stating its own, a folder stating two, and a folder two levels up give nothing.
 - An instrument's metadata, named as the acquisition beside it but for the extension, is raw
   data and not a second acquisition, and a folder of movies and their metadata is no experiment.
+- A label the Dictionary does not know, numbered ``R1`` to ``R11``, is asked about as a replicate
+  marker, where version 1 read any run past 9 as a version and never asked.
 - The files one file names are bounded apart from a shared key's bucket.
 """
 
@@ -102,6 +104,16 @@ def test_a_folder_of_movies_and_their_metadata_is_no_experiment(project: Project
     assert contents.get(f"{DAY}/images") != "experiment"
     # Version 3 read each metadata file as named for its movie, and called this folder one.
     assert contents.get(f"{MOVIES}/raw") == "acquisitions"
+
+
+def test_a_run_of_eleven_labelled_files_is_asked_about(project: Project) -> None:
+    """``R1`` to ``R11`` in one folder and ``R1``, ``R2`` in another: the engine does not know what
+    ``R`` means, so it asks. It decides nothing, and nothing groups the files as replicates."""
+    with open_catalog(project.path) as catalog:
+        raised = catalog.query(
+            "SELECT raised FROM findings WHERE rule_id = 'indexed_label_may_mark_replicates'"
+        ).fetchall()
+    assert [list(row[0]) for row in raised] == [["r"]]
 
 
 def test_the_files_one_file_names_are_bounded_apart() -> None:

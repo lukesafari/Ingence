@@ -58,8 +58,8 @@ def test_the_new_stage_rules_publish_their_claims() -> None:
 
 
 def test_each_revision_6_module_declares_its_lists_and_has_a_docstring() -> None:
-    from ingence.rulebook.revision_6 import derivations, experiments, workflows
+    from ingence.rulebook.revision_6 import derivations, experiments, names, workflows
 
-    for module in (workflows, derivations, experiments):
+    for module in (workflows, derivations, experiments, names):
         assert isinstance(module.RULES, list) and isinstance(module.CHANGES, list), module.__name__
         assert (module.__doc__ or "").strip(), module.__name__
