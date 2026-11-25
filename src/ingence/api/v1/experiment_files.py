@@ -959,9 +959,11 @@ def experiment_files(
                 by_value = name in kinds.get(str(value), set())
                 by_name = theme not in held_kinds and _like(predicate, pattern)
                 if by_value or by_name:
+                    # A value is conflicting only where every claim of it is: one rule settling
+                    # it settles it, whatever a rule set aside said of the same value.
                     conflicting = claim["resolution_status"] == "examined_conflicting"
-                    held_value = concluded[name].get(str(value), False)
-                    concluded[name][str(value)] = held_value or conflicting
+                    held_value = concluded[name].get(str(value), True)
+                    concluded[name][str(value)] = held_value and conflicting
         believed, said = _believed(held)
         own_pairs: list[DerivationPair] = []
         derived: list[DerivedFile] = []
