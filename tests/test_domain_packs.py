@@ -172,7 +172,13 @@ def test_the_core_s_half_declares_origins_and_names_no_writer(tmp_path) -> None:
     core = format_origins(DictionaryStore(_sections(tmp_path, "core", _CORE_HALF)))
     assert core["zib_format"] == {}
     together = (*_sections(tmp_path, "pack", _PACK_HALF), *_sections(tmp_path, "c2", _CORE_HALF))
-    assert format_origins(DictionaryStore(together))["zib_format"] == {"kelt": "instrument"}
+    origins = format_origins(DictionaryStore(together))["zib_format"]
+    # The pack's spelling, and each compression of it: a compressed file is the format it holds.
+    assert origins["kelt"] == "instrument"
+    assert {spelling for spelling in origins if spelling != "kelt"} == {
+        f"kelt.{compressed}" for compressed in ("bz2", "gz", "lz4", "lzma", "xz", "zst")
+    }
+    assert set(origins.values()) == {"instrument"}
 
 
 def test_an_extension_whose_type_is_not_loaded_stands_as_that_type(tmp_path) -> None:

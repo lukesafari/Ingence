@@ -9,6 +9,8 @@ spelling that an instrument writes. Two places can say so:
 - the file-type table (``dictionary/file_types.yaml``), where a row marked ``can_be_raw: yes``
   makes every extension of its family an instrument's.
 
+A spelling compressed (``fastq.gz``) is written by whoever writes the spelling it compresses.
+
 :func:`recorded_origins` is the one place that makes that choice, so a rule reads one mapping. A
 table that cannot be read (``FileTypeTableError``) leaves the senses' origins as they are.
 """
@@ -21,6 +23,7 @@ from ingence.dictionary.file_types import FileTypeTableError, file_type_table
 from ingence.dictionary.store import ORIGINS, WRITTEN_BY
 
 if TYPE_CHECKING:
+    from ingence.dictionary.file_types import FileTypeTable
     from ingence.dictionary.store import DictionaryStore
 
 __all__ = ["ACQUISITION_WRITER", "format_origins", "recorded_origins"]
@@ -76,4 +79,31 @@ def recorded_origins(vocabulary: DictionaryStore) -> dict[str, dict[str, str]]:
         if row.can_be_raw == "yes":
             for spelling in row.extensions:
                 held[spelling.casefold()] = ACQUISITION_WRITER
+    _compressed_spellings_written_alike(origins, table)
     return {term: dict(sorted(spelled.items())) for term, spelled in sorted(origins.items())}
+
+
+def _compressed_spellings_written_alike(
+    origins: dict[str, dict[str, str]], table: FileTypeTable
+) -> None:
+    """Give a format's spelling, compressed, the writer of the spelling it compresses.
+
+    A compression written after a format's own suffix is that format, compressed (``wraps`` in the
+    file-type table): ``S1_R1_001.fastq.gz`` is a file of reads, and the Dictionary binds its
+    extension to the read format. Compressing a file does not change who wrote what it holds, so
+    ``fastq.gz`` is written by whoever writes ``fastq``. Without this, a sequencer's reads, which
+    are almost always kept compressed, were never recorded data. A compound the table declares
+    whole (``tar.gz``) is read as declared and is left as it is.
+    """
+    wrappers = sorted(
+        {extension.casefold() for row in table.rows if row.wraps for extension in row.extensions}
+    )
+    declared = {extension.casefold() for row in table.rows for extension in row.extensions}
+    for spelled in origins.values():
+        for spelling, writer in list(spelled.items()):
+            if spelling in wrappers:
+                continue
+            for wrapper in wrappers:
+                compressed = f"{spelling}.{wrapper}"
+                if compressed not in declared and compressed not in spelled:
+                    spelled[compressed] = writer

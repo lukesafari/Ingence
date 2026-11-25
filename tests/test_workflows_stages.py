@@ -42,6 +42,7 @@ NAMES: dict[str, str] = {
     "zeph_raw.nd2": "x",
     "reads_R1.fastq": "@r\nACGT\n+\nIIII\n",
     "reads_R1.fq": "x",
+    "reads_R2.fastq.gz": "x",
     "genome.fasta": ">a\nACGT\n",
 }
 
@@ -110,6 +111,7 @@ def test_a_read_file_is_an_acquisition_and_a_fasta_is_not(project: Project) -> N
     acquisition = ("acquisition_stage_from_format", "acquisition")
     assert acquisition in stages["reads_R1.fastq"]
     assert acquisition in stages["reads_R1.fq"]
+    assert acquisition in stages["reads_R2.fastq.gz"], "a compressed read file is still reads"
     assert stages["genome.fasta"] == set(), "a reference or an assembly declares no writer"
 
 
@@ -118,7 +120,12 @@ def test_the_one_function_says_a_read_spelling_is_an_instruments() -> None:
     from ingence.dictionary.store import DictionaryStore
 
     origins = recorded_origins(DictionaryStore.builtin())
-    assert origins["read_format"] == {"fastq": ACQUISITION_WRITER, "fq": ACQUISITION_WRITER}
+    # Each spelling, and each spelling compressed: a sequencer's reads are kept gzipped.
+    assert origins["read_format"] == {
+        f"{spelling}{compressed}": ACQUISITION_WRITER
+        for spelling in ("fastq", "fq")
+        for compressed in ("", ".bz2", ".gz", ".lz4", ".lzma", ".xz", ".zst")
+    }
     # The core's image type still declares origins and names no writer.
     assert "image_format" in origins
 
