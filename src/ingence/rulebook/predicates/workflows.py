@@ -44,6 +44,7 @@ from ingence.rulebook.registry import (
     Concluded,
     PairsWithinTheClass,
     Predicate,
+    PredicateNotEvaluableError,
     Reads,
     declare,
 )
@@ -58,6 +59,8 @@ __all__ = [
     "NEIGHBOUR_PREDICATES",
     "LaterStepOfASibling",
     "LaterStepOfSameFile",
+    "StageBesideItsAcquisition",
+    "StageFromEnclosingFolder",
     "StageFromNameParts",
     "StageInWorkflow",
     "standing_parts",
@@ -745,3 +748,197 @@ def _build_stage_from_name_parts() -> Predicate:
 )
 def _build_later_step_of_same_file() -> Predicate:
     return LaterStepOfSameFile()
+
+
+class StageFromEnclosingFolder:
+    """A file that states no stage of its own sits at the one stage its folder's name states.
+
+    ``proc/A549_vehicle_002.tif`` is processed without saying so: people put the distinguishing
+    part of a name in the file and the shared part in the folder above it. The predicate reads the
+    folder one hop up and never further (``maximum_hops`` is declared and bounded at one). It reads
+    the folder's name as ``stage_from_name_parts`` reads a file's: a sense of the axis counts only
+    where its word is one whole part of the name, and a name stating two stages states none.
+
+    It abstains where the file's own name binds a stage among ``senses`` (that is the name rule's to
+    say), where the file is in a spelling an instrument writes or is the metadata beside one (its
+    format states its stage), where the file is a bundle named for what it holds
+    (``not_in_formats``), and where the folder states no stage or several. The rules stating a
+    file's own stage are its defeaters besides, and a defeated claim is published as conflicting;
+    abstaining first keeps a raw movie in ``raw/`` from carrying a second, set-aside stage. The
+    claim cites the file alone: the folder's records are about another entry, and the folder's
+    path is said in the reason a reader is shown.
+    """
+
+    name = "stage_from_enclosing_folder"
+    version = "1"
+
+    def evaluate(self, subject: object, parameters: Mapping[str, object]) -> object:
+        """Return the stage the enclosing folder's name states, or None."""
+        found = self._read(subject, parameters)
+        if found is None or isinstance(found, Abstention):
+            return None
+        entry = getattr(subject, "entry", None)
+        return Concluded(values=(found,), inputs=(entry.entry_id,) if entry is not None else ())
+
+    def explain_abstention(self, subject: object, parameters: Mapping[str, object]) -> Abstention:
+        """Say why the folder's stage was not taken."""
+        found = self._read(subject, parameters)
+        if isinstance(found, Abstention):
+            return found
+        return Abstention(reason="the folder's stage was taken")
+
+    @staticmethod
+    def _read(subject: object, parameters: Mapping[str, object]) -> str | Abstention | None:
+        entry = getattr(subject, "entry", None)
+        if entry is None:
+            return Abstention(reason="the rule reads an entry beside its folder, and got none")
+        kind = str(parameters.get("theme_kind", ""))
+        named = _named_senses(parameters)
+        floor = _floor(parameters)
+        bundles = _names(parameters, "not_in_formats")
+
+        def on_axis(binding: DictionaryBinding) -> bool:
+            return (
+                binding.resolution_status is ResolutionStatus.RESOLVED
+                and binding.theme_kind == kind
+                and binding.term is not None
+                and (named is None or binding.term in named)
+                and match_quality_meets(binding.quality, floor)
+            )
+
+        own = tuple(getattr(subject, "bindings", ()))
+        if any(
+            binding.term in bundles
+            for binding in own
+            if binding.constraint is not None
+            and binding.constraint.split(":", 1)[0] == _EXTENSION_SLOT
+        ):
+            return Abstention(reason="the file is a bundle, named for what it holds")
+        if getattr(subject, "acquired", False):
+            return Abstention(reason="the file is in a spelling an instrument writes")
+        if getattr(subject, "acquisition_beside", None):
+            return Abstention(reason="the file is the metadata of the acquisition beside it")
+        stated = sorted({str(binding.term) for binding in _free(own) if on_axis(binding)})
+        if stated:
+            return Abstention(
+                reason=f"the file's own name states {', '.join(str(term) for term in stated)}"
+            )
+        folder = getattr(subject, "folder", None)
+        if not folder:
+            return Abstention(reason="the file lies at a root, in no folder of the pool")
+        parts = standing_parts(folder.rsplit("/", 1)[-1], None)
+        values = {
+            component.component_id: component.normalized_value.casefold()
+            for component in getattr(subject, "folder_components", ())
+        }
+        senses = sorted(
+            {
+                str(binding.term)
+                for binding in _free(tuple(getattr(subject, "folder_bindings", ())))
+                if on_axis(binding) and values.get(binding.component_id, "") in parts
+            }
+        )
+        if not senses:
+            return Abstention(reason=f"the folder {folder} states no stage of kind {kind}")
+        if len(senses) > 1:
+            return Abstention(
+                status=ResolutionStatus.EXAMINED_CONFLICTING,
+                failure_class=FailureClass.INTERPRETATION,
+                reason=f"the folder {folder} states {len(senses)} stages: {', '.join(senses)}",
+            )
+        return senses[0]
+
+
+class StageBesideItsAcquisition:
+    """A file of a metadata format named as an acquisition beside it sits at that acquisition's
+    stage.
+
+    An instrument writes its metadata beside each acquisition under the acquisition's own name
+    (``A549_001.nd2`` and ``A549_001.xml``). That file was written as the data was acquired, and
+    it is part of the acquisition: it is not named for it the way an analysis tool names what it
+    writes, with words of its own. The pass finds the acquisition beside it from names and the
+    spellings the Dictionary declares an instrument writes (``acquisition_beside``); the predicate
+    asks that the file's own extension bound one of ``formats``, at ``minimum_match_quality`` or
+    better, and concludes ``concludes``.
+    """
+
+    name = "stage_beside_its_acquisition"
+    version = "1"
+
+    def evaluate(self, subject: object, parameters: Mapping[str, object]) -> object:
+        """Return the stage concluded, or None."""
+        found = self._read(subject, parameters)
+        if isinstance(found, Abstention):
+            return None
+        return found
+
+    def explain_abstention(self, subject: object, parameters: Mapping[str, object]) -> Abstention:
+        """Say why: no acquisition beside it, or a format the rule does not name."""
+        found = self._read(subject, parameters)
+        if isinstance(found, Abstention):
+            return found
+        return Abstention(reason="the acquisition's stage was taken")
+
+    @staticmethod
+    def _read(subject: object, parameters: Mapping[str, object]) -> Concluded | Abstention:
+        entry = getattr(subject, "entry", None)
+        if entry is None:
+            return Abstention(reason="the rule reads an entry beside its folder, and got none")
+        concludes = str(parameters.get("concludes", "")).strip()
+        if not concludes:
+            message = "stage_beside_its_acquisition concludes the stage its rule names, and none is"
+            raise PredicateNotEvaluableError(message)
+        beside = getattr(subject, "acquisition_beside", None)
+        if not beside:
+            return Abstention(reason="no acquisition of the file's own name lies beside it")
+        formats = _names(parameters, "formats")
+        floor = _floor(parameters)
+        matched = sorted(
+            binding.binding_id
+            for binding in getattr(subject, "bindings", ())
+            if binding.resolution_status is ResolutionStatus.RESOLVED
+            and binding.constraint is not None
+            and binding.constraint.split(":", 1)[0] == _EXTENSION_SLOT
+            and binding.term in formats
+            and match_quality_meets(binding.quality, floor)
+        )
+        if not matched:
+            return Abstention(
+                reason=f"{beside} lies beside it, and its extension is none of the formats named"
+            )
+        return Concluded(values=(concludes,), inputs=(entry.entry_id, *matched))
+
+
+@declare(
+    "stage_from_enclosing_folder",
+    version="1",
+    summary="Classify a file stating no stage by the one stage its enclosing folder's name states",
+    effect=RuleEffect.CLASSIFIES,
+    reads=Reads.ENCLOSING_FOLDER,
+    parameters=(
+        "maximum_hops",
+        "minimum_match_quality",
+        "not_in_formats",
+        "senses",
+        "theme_kind",
+    ),
+    support_families=("name_binding",),
+    # The enclosing folder's records are handed over by the pass, which reads the pool first.
+    reach="attached",
+)
+def _build_stage_from_enclosing_folder() -> Predicate:
+    return StageFromEnclosingFolder()
+
+
+@declare(
+    "stage_beside_its_acquisition",
+    version="1",
+    summary="Classify a metadata file named as an acquisition beside it at the acquisition's stage",
+    effect=RuleEffect.CLASSIFIES,
+    reads=Reads.ENCLOSING_FOLDER,
+    parameters=("concludes", "formats", "minimum_match_quality"),
+    support_families=("name_binding",),
+    reach="attached",
+)
+def _build_stage_beside_its_acquisition() -> Predicate:
+    return StageBesideItsAcquisition()

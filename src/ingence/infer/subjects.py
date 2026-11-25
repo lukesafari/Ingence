@@ -71,6 +71,7 @@ __all__ = [
     "Derivation",
     "DerivedFrom",
     "DirectoryCounts",
+    "EnclosingFolder",
     "EntryAmongSiblings",
     "EntryInRoot",
     "EntryObservations",
@@ -359,6 +360,31 @@ class NameDates:
     folder: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class EnclosingFolder:
+    """One entry beside the folder that holds it, and the acquisition its own name is beside.
+
+    A predicate reading it is handed what the folder's name was cut into and what the Dictionary
+    made of each piece, never the folder's other records and never anything further up.
+    """
+
+    entry: Entry
+    #: The entry's own name: its components and what the Dictionary made of them.
+    components: tuple[Component, ...] = ()
+    bindings: tuple[DictionaryBinding, ...] = ()
+    #: The enclosing folder's path, and its name's components and bindings. Empty for an entry
+    #: at a root.
+    folder: str | None = None
+    folder_components: tuple[Component, ...] = ()
+    folder_bindings: tuple[DictionaryBinding, ...] = ()
+    #: The file beside it in the same folder whose name is its own but for the extension, in a
+    #: spelling an instrument writes (``A_001.nd2`` beside ``A_001.xml``), and that file's path.
+    #: Empty where there is none, or where the entry is itself in such a spelling.
+    acquisition_beside: str | None = None
+    #: Whether the entry is itself in a spelling an instrument writes: its format states its stage.
+    acquired: bool = False
+
+
 def template_key(name: str) -> str:
     """A file's name as one tool's batch writes it: its extension, and its first and last parts.
 
@@ -492,6 +518,13 @@ class EntryRecords:
     #: The dates the nearest dated folder above it names, and that folder's path.
     folder_dates: tuple[str, ...] = ()
     dated_folder: str | None = None
+    #: The enclosing folder's path and its name's records, and the acquisition of the entry's own
+    #: name beside it, where a rule reads the enclosing folder (:class:`EnclosingFolder`).
+    enclosing_folder: str | None = None
+    enclosing_components: tuple[Component, ...] = ()
+    enclosing_bindings: tuple[DictionaryBinding, ...] = ()
+    acquisition_beside: str | None = None
+    acquired: bool = False
     #: True for a folder a person said is not an installed program or a package, read from the
     #: Record. The rule raising a folder as one leaves it alone.
     not_a_program: bool = False
@@ -557,6 +590,17 @@ class EntryRecords:
                 inherited=self.folder_dates,
                 folder=self.dated_folder,
             )
+        if reads is Reads.ENCLOSING_FOLDER:
+            return EnclosingFolder(
+                entry=self.entry,
+                components=self.components,
+                bindings=self.bindings,
+                folder=self.enclosing_folder,
+                folder_components=self.enclosing_components,
+                folder_bindings=self.enclosing_bindings,
+                acquisition_beside=self.acquisition_beside,
+                acquired=self.acquired,
+            )
         if reads is Reads.ARCHIVED_COPY:
             return ArchivedCopy(
                 entry=self.entry,
@@ -606,6 +650,10 @@ class EntryRecords:
             Reads.DERIVED_FROM,
             Reads.ANSWERED_COPIES,
         }:
+            found.add(self.entry.entry_id)
+        if reads is Reads.ENCLOSING_FOLDER:
+            # The entry, and the bindings of its own name that carry the value. The folder's
+            # bindings are about another entry and are named in the claim's support, not cited.
             found.add(self.entry.entry_id)
         if reads in {Reads.BINDINGS, Reads.RECORDS, Reads.FORMAT_ORIGIN}:
             found.update(

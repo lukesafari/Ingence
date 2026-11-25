@@ -141,6 +141,10 @@ rules:
     instrument writes. These are image, electrophysiology, mass spectrometry and sequencing formats.
   stage_inherited_from_folder: >-
     When a file’s name states no step of the work, the file takes the step its folder’s name states.
+    It does not when its format or contents state one, or when the folder’s name states two.
+  metadata_stage_from_its_acquisition: >-
+    Ingence takes an instrument’s metadata file, named as the recording beside it, such as A.xml
+    beside A.nd2, to be raw data written with the recording.
   condition_inherited_from_folder: >-
     When a file’s name states no condition, the file takes the condition its folder’s name states.
   technique_from_name: >-

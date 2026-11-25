@@ -160,6 +160,8 @@ VALUE_RULES: dict[str, tuple[str, tuple[str, ...]]] = {
             # a name ending in two extensions.
             "stage_from_writer_tags",
             "export_stage_from_inner_format",
+            # Revision 6: an instrument's metadata, at its acquisition's stage.
+            "metadata_stage_from_its_acquisition",
         ),
     ),
     "experiment_folder": (

@@ -84,6 +84,10 @@ STAGE_RULES: tuple[str, ...] = (
     # ending in two extensions.
     "stage_from_writer_tags",
     "export_stage_from_inner_format",
+    # Revision 6: the stage a folder's name hands its files, and an instrument's metadata at its
+    # recording's stage.
+    "stage_inherited_from_folder",
+    "metadata_stage_from_its_acquisition",
 )
 
 

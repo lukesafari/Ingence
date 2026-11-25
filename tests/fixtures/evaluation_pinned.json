@@ -97,6 +97,14 @@
     "starved": 0,
     "unexamined": 0
    },
+   "metadata_stage_from_its_acquisition": {
+    "concluded": 0,
+    "conflicting": 0,
+    "evaluated": 63,
+    "no_evidence": 63,
+    "starved": 0,
+    "unexamined": 0
+   },
    "pipeline_stage_from_name": {
     "concluded": 15,
     "conflicting": 0,
@@ -128,6 +136,14 @@
     "no_evidence": 18,
     "starved": 0,
     "unexamined": 45
+   },
+   "stage_inherited_from_folder": {
+    "concluded": 2,
+    "conflicting": 0,
+    "evaluated": 63,
+    "no_evidence": 61,
+    "starved": 0,
+    "unexamined": 0
    }
   },
   "families": {
@@ -964,10 +980,10 @@
      "by_tier": {
       "defeasible": {
        "correct": 25,
-       "wrong": 0
+       "wrong": 2
       }
      },
-     "concluded": 25,
+     "concluded": 27,
      "conflicting": 0,
      "correct": 25,
      "coverage": [
@@ -981,10 +997,40 @@
      "outside": 0,
      "precision": [
       25,
-      25
+      27
      ],
      "recall": [
       25,
+      25
+     ],
+     "undecidable": 0,
+     "undecidable_conflicting": 0,
+     "undecidable_decided": 0,
+     "undecidable_no_claim": 0,
+     "wrong": 2,
+     "wrong_value": 0,
+     "wrong_where_none": 2
+    },
+    "export_stage_from_inner_format": {
+     "by_tier": {},
+     "concluded": 0,
+     "conflicting": 0,
+     "correct": 0,
+     "coverage": [
+      0,
+      25
+     ],
+     "expected": 25,
+     "ignored": 0,
+     "no_claim": 25,
+     "none_where_value": 0,
+     "outside": 0,
+     "precision": [
+      0,
+      0
+     ],
+     "recall": [
+      0,
       25
      ],
      "undecidable": 0,
@@ -995,7 +1041,7 @@
      "wrong_value": 0,
      "wrong_where_none": 0
     },
-    "export_stage_from_inner_format": {
+    "metadata_stage_from_its_acquisition": {
      "by_tier": {},
      "concluded": 0,
      "conflicting": 0,
@@ -1121,8 +1167,13 @@
      "wrong_where_none": 0
     },
     "stage_inherited_from_folder": {
-     "by_tier": {},
-     "concluded": 0,
+     "by_tier": {
+      "defeasible": {
+       "correct": 0,
+       "wrong": 2
+      }
+     },
+     "concluded": 2,
      "conflicting": 0,
      "correct": 0,
      "coverage": [
@@ -1136,7 +1187,7 @@
      "outside": 0,
      "precision": [
       0,
-      0
+      2
      ],
      "recall": [
       0,
@@ -1146,9 +1197,9 @@
      "undecidable_conflicting": 0,
      "undecidable_decided": 0,
      "undecidable_no_claim": 0,
-     "wrong": 0,
+     "wrong": 2,
      "wrong_value": 0,
-     "wrong_where_none": 0
+     "wrong_where_none": 2
     }
    }
   },

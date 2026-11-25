@@ -45,9 +45,21 @@ def test_revision_6_declares_each_rule_again_at_a_higher_version() -> None:
             assert int(before.version.split("+")[0]) < int(now.version.split("+")[0]), rule_id
 
 
-def test_each_revision_6_module_declares_its_lists_and_has_a_docstring() -> None:
-    from ingence.rulebook.revision_6 import derivations
+def test_the_new_stage_rules_publish_their_claims() -> None:
+    """A defeasible rule naming no defeater publishes nothing, so each stage rule revision 6
+    declares names the rules that state a file's own stage."""
+    book = shipped_rulebook()
+    folder = book.by_id("stage_inherited_from_folder")
+    metadata = book.by_id("metadata_stage_from_its_acquisition")
+    assert folder is not None and metadata is not None
+    assert {"acquisition_stage_from_format", "pipeline_stage_from_name"} <= set(folder.defeated_by)
+    assert "metadata_stage_from_its_acquisition" in folder.defeated_by
+    assert "pipeline_stage_from_name" in metadata.defeated_by
 
-    for module in (derivations,):
+
+def test_each_revision_6_module_declares_its_lists_and_has_a_docstring() -> None:
+    from ingence.rulebook.revision_6 import derivations, experiments, workflows
+
+    for module in (workflows, derivations, experiments):
         assert isinstance(module.RULES, list) and isinstance(module.CHANGES, list), module.__name__
         assert (module.__doc__ or "").strip(), module.__name__

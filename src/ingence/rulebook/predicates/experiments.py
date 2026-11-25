@@ -268,6 +268,7 @@ class ExperimentFromDatedName:
         "minimum_items",
         "minimum_key_characters",
         "most_folders_a_date",
+        "sidecar_formats",
     ),
     support_families=("filesystem_fact", "name_structure"),
 )

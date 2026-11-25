@@ -532,7 +532,13 @@ def _run_inference(
         # run that consulted it records which one.
         vocabulary = (
             _vocabulary(project)
-            if reads & {Reads.NAME_SPELLINGS, Reads.FORMAT_ORIGIN, Reads.FOLDER_CONTENTS}
+            if reads
+            & {
+                Reads.NAME_SPELLINGS,
+                Reads.FORMAT_ORIGIN,
+                Reads.FOLDER_CONTENTS,
+                Reads.ENCLOSING_FOLDER,
+            }
             or reads_layouts
             else None
         )
@@ -540,7 +546,8 @@ def _run_inference(
         # acquisitions by it. It is read once and handed to both.
         declared_origins = (
             format_origins(vocabulary)
-            if vocabulary is not None and reads & {Reads.FORMAT_ORIGIN, Reads.FOLDER_CONTENTS}
+            if vocabulary is not None
+            and reads & {Reads.FORMAT_ORIGIN, Reads.FOLDER_CONTENTS, Reads.ENCLOSING_FOLDER}
             else None
         )
         # A declared workflow's entering types count as acquisitions. A folder's acquisitions are
@@ -677,6 +684,7 @@ def _run_inference(
             most_folders_a_date=_minimum_items(in_force, shapes, "most_folders_a_date"),
             declared_copies=copies,
             broken=unanswered,
+            sidecar_spellings=_sidecar_spellings(in_force, shapes),
         )
 
     # An archive's link is matched to the real file it stands for, from names and link text alone,
@@ -694,6 +702,16 @@ def _run_inference(
         from ingence.infer.name_dates import with_folder_dates
 
         records = with_folder_dates(records)
+
+    # The folder a file lies in, one hop up, and the acquisition its own name lies beside, where a
+    # rule reads them.
+    if Reads.ENCLOSING_FOLDER in set(shapes.values()):
+        from ingence.infer.enclosing_folder import with_enclosing_folders
+        from ingence.infer.folder_contents import acquisition_spellings
+
+        records = with_enclosing_folders(
+            records, acquisition_spellings(declared_origins or {}, ACQUISITION_WRITER)
+        )
 
     # A person's answer on a folder of miscellaneous files is marked on what the folder holds,
     # where that is counted.
@@ -2259,6 +2277,41 @@ def _minimum_key_characters(in_force: Mapping[str, Rule], shapes: Mapping[str, R
         and any(spec.name == "minimum_key_characters" for spec in rule.parameters)
     ]
     return min(declared, default=MINIMUM_KEY_CHARACTERS)
+
+
+def _sidecar_spellings(in_force: Mapping[str, Rule], shapes: Mapping[str, Reads]) -> frozenset[str]:
+    """The spellings of an instrument's metadata, as the rules reading folder contents name its
+    formats (``sidecar_formats``): every extension the file-type table gives those families.
+
+    Empty where no rule in force names one, so the folders are counted as version 3 of the
+    experiment rule counted them. A table that cannot be read names none.
+    """
+    from ingence.dictionary.file_types import FileTypeTableError, file_type_table
+
+    formats = {
+        str(name)
+        for rule_id, rule in sorted(in_force.items())
+        if shapes.get(rule_id) is Reads.FOLDER_CONTENTS
+        and any(spec.name == "sidecar_formats" for spec in rule.parameters)
+        for name in _listed(parameters_in_force(rule)["sidecar_formats"])
+    }
+    if not formats:
+        return frozenset()
+    try:
+        table = file_type_table()
+    except FileTypeTableError:
+        return frozenset()
+    return frozenset(
+        extension.casefold()
+        for row in table.rows
+        if row.family in formats
+        for extension in row.extensions
+    )
+
+
+def _listed(value: object) -> tuple[object, ...]:
+    """A string-list parameter's items, and none for anything else."""
+    return tuple(value) if isinstance(value, (list, tuple)) else ()
 
 
 def _minimum_items(

@@ -515,7 +515,7 @@ def test_every_rule_keeps_the_version_it_had_so_every_decision_still_applies(
         "stage_disagrees_with_a_derivation": (None, "2"),
         "related_within_name_identity": (None, "3"),
         # A run's per-item folders holding the same files are its parts.
-        "experiment_folder_from_contents": ("2", "3"),
+        "experiment_folder_from_contents": ("2", "4"),
         "experiment_folder_from_dated_name": ("1", "2"),
         # A template's creation stamp is not when a document first existed.
         "earliest_credible_time": ("2", "3"),
@@ -538,7 +538,10 @@ def test_every_rule_keeps_the_version_it_had_so_every_decision_still_applies(
         "experiments_may_belong_together": ("3", "4"),
         # Revision 6: the rules the invented laboratory's accuracy test asked for.
         "derivation_by_a_scripts_calls": ("1", "2"),
+        "stage_inherited_from_folder": ("1", "2"),
     }
+    # New at revision 6, so it stood in no book before the fold.
+    assert versions_after.pop("metadata_stage_from_its_acquisition") == "1"
     for rule_id, (old, new) in raised_after.items():
         assert versions_before.pop(rule_id, None) in (old, f"{old}+d1"), rule_id
         if rule_id == "succeeds_by_series_index":

@@ -48,6 +48,8 @@ def _pool(base: Path) -> Path:
         held.parent.mkdir(parents=True, exist_ok=True)
         held.write_text("x")
         (pool / HEK / f"hek293_gfp_{number:03d}_proc.tif").write_text("x")
+    # A table in the experiment's own folder, which states no step: only the workflow places it.
+    (pool / HELA / "hela_dapi_counts.csv").write_text("t,x\n1,2\n")
     return pool
 
 
@@ -254,7 +256,9 @@ def test_the_suggestion_is_deterministic(project: Project, tmp_path: Path) -> No
 def test_stage_from_workflow_places_files_by_the_suggested_workflow(project: Project) -> None:
     placed = _placed(project)
     # A file no rule reading the file itself placed: the workflow's type says analysis.
-    assert placed[f"{HELA}/analysis/hela_dapi_001.csv"] == "analysis"
+    assert placed[f"{HELA}/hela_dapi_counts.csv"] == "analysis"
+    # A file its folder's name placed (``analysis/``) is left as placed.
+    assert f"{HELA}/analysis/hela_dapi_001.csv" not in placed, "its folder placed it"
     # A file its format or its name already placed is left as placed, never contradicted.
     assert f"{HELA}/analysis/Traj_hela_dapi_002.csv" not in placed, "a derived sense placed it"
     assert f"{HELA}/raw/hela_dapi_001.nd2" not in placed, "the format rule placed it"
@@ -382,7 +386,7 @@ def test_declaring_withdrawing_and_the_next_run(project: Project) -> None:
         item["in_force"] is False for item in stated.values() if item["origin"] == "suggested"
     )
     placed = _placed(project)
-    assert placed[f"{HELA}/analysis/hela_dapi_001.csv"] == "analysis"
+    assert placed[f"{HELA}/hela_dapi_counts.csv"] == "analysis"
     assert f"{HELA}/raw/hela_dapi_001.nd2" not in placed, "the format rule placed it"
     assert f"{HELA}/notes.txt" not in placed, "exempt"
     status, body = _ask(project, "workflows")

@@ -137,6 +137,8 @@ class ScaleParameters:
         # extensions.
         "stage_from_writer_tags",
         "export_stage_from_inner_format",
+        # Revision 6: an instrument's metadata at its recording's stage.
+        "metadata_stage_from_its_acquisition",
     )
     #: Stages that mean "the data as it came off the instrument" and "something made from it".
     #: They are Dictionary terms of the ``stage`` kind. The declared transitions give this order,

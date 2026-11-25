@@ -878,8 +878,11 @@ class ClassFromEnclosingFolder:
     will inherit confidently and wrongly. The characteriser records the features that would say
     which regime applies. Nothing validates the assignment yet, so the rule stays weak on purpose.
 
-    Declared and not evaluable. It needs the enclosing folder's own bindings beside the file's,
-    which is a rollup that nothing assembles yet.
+    Declared and not evaluable. It reads an entry's records alone, and the enclosing folder's own
+    bindings are not among them. Revision 6's ``stage_inherited_from_folder`` reads them through
+    ``stage_from_enclosing_folder``, handed the folder's name beside the file's
+    (``Reads.ENCLOSING_FOLDER``); ``condition_inherited_from_folder`` still names this predicate,
+    because which condition a folder's words state needs its own measurement.
     """
 
     name = "class_from_enclosing_folder"

@@ -56,9 +56,10 @@ def tables_read(reads: Collection[Reads]) -> frozenset[str]:
         Reads.FORMAT_ORIGIN,
         Reads.FOLDER_CONTENTS,
         Reads.NAME_DATES,
+        Reads.ENCLOSING_FOLDER,
     }:
         tables.add("components")
-    if wanted & {Reads.BINDINGS, Reads.RECORDS, Reads.FORMAT_ORIGIN}:
+    if wanted & {Reads.BINDINGS, Reads.RECORDS, Reads.FORMAT_ORIGIN, Reads.ENCLOSING_FOLDER}:
         tables.add("dictionary_bindings")
     if wanted & {Reads.OBSERVATIONS, Reads.RECORDS, Reads.ENTRY_OBSERVATIONS}:
         tables.add("observations")

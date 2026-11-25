@@ -204,6 +204,12 @@ class Reads(StrEnum):
     #: The entry beside the dates its own name holds and those of the nearest folder above it whose
     #: name holds one. A name's date is a neighborhood. It is descriptive and never a clock.
     NAME_DATES = "name_dates"
+    #: The entry beside the folder that holds it, one hop up and never further: its own name's
+    #: components and bindings, the folder's name's components and bindings, and the acquisition
+    #: of the entry's own name lying beside it, where one does. The pass assembles it from names
+    #: and declared formats alone. What a folder's name states is a statement about everything in
+    #: it, and the hop is bounded at one because containment is transitive and the inference is not.
+    ENCLOSING_FOLDER = "enclosing_folder"
     #: The entry beside the acquisition its name holds whole, nearest it in its experiment, or, for
     #: an acquisition, itself. The pass matches from names and the classifying phase's acquisition
     #: claims, at the smallest minimum that any rule reading it names.
@@ -263,6 +269,7 @@ ENTRY_SHAPED: frozenset[Reads] = frozenset(
         Reads.APPROVED_GROUP,
         Reads.ARCHIVED_COPY,
         Reads.NAME_DATES,
+        Reads.ENCLOSING_FOLDER,
         Reads.NAMED_ACQUISITION,
         Reads.DERIVED_FROM,
         Reads.ANSWERED_COPIES,

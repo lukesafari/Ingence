@@ -13,6 +13,10 @@ means:
   its parts in order (``Drift_<movie>_results.csv``, ``Traj_<movie>.nd2.csv``,
   ``MAX_<movie>.tif``). This is the way analysis tools name what they write. The pass reads the
   name as parts cut at separators, never as words.
+- A file in one of the ``sidecar_spellings`` (an instrument's metadata: ``<movie>.xml``) whose
+  name is an acquisition's beside it, but for the extension, is part of that acquisition. It is
+  counted neither as named for it nor as unnamed: a folder of movies and their metadata holds
+  acquisitions only, and is no experiment because of them.
 - Where that material is bound together: how much of what lies beneath a folder the own files of
   the folders above it also hold or are named for, how much its parent holds directly, and whether
   the folder's subfolders holding material are linked to one another by the acquisition names they
@@ -400,6 +404,7 @@ def with_folder_contents(
     writer: str = ACQUISITION_WRITER,
     declared_copies: Mapping[str, int] | None = None,
     broken: Mapping[str, str] | None = None,
+    sidecar_spellings: frozenset[str] = frozenset(),
 ) -> tuple[EntryRecords, ...]:
     """Attach to every folder what it holds (:class:`FolderContents`), and to nothing else.
 
@@ -473,6 +478,15 @@ def with_folder_contents(
         for key in keys:
             if key not in index[key[0]]:
                 index[key[0]].append(key)
+    # An instrument's metadata beside its acquisition, under the acquisition's own name, is part of
+    # the acquisition, and is counted as nothing else.
+    if sidecar_spellings:
+        others = [
+            (folder, parts, extension)
+            for folder, parts, extension in others
+            if extension not in sidecar_spellings
+            or _key(parts, minimum_key_characters) not in acquired_here.get(folder, set())
+        ]
 
     named_here: dict[str | None, int] = defaultdict(int)
     named_keys_here: dict[str | None, set[tuple[str, ...]]] = defaultdict(set)

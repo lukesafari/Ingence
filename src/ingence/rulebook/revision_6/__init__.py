@@ -12,26 +12,31 @@ The revision is a package with one module for each topic. Each module exports ``
 ``CHANGES``, assembled here into one dict shaped exactly like
 :data:`ingence.rulebook.revision_4.REVISION`:
 
+- :mod:`~ingence.rulebook.revision_6.workflows`: the stage a folder's name states, and an
+  instrument's metadata beside its acquisition;
 - :mod:`~ingence.rulebook.revision_6.derivations`: a script's inputs and outputs read step by
-  step.
+  step;
+- :mod:`~ingence.rulebook.revision_6.experiments`: an instrument's metadata in an experiment
+  folder's count.
 
 :func:`ingence.rulebook.load.load_revisions` loads the revision after revision 5.
 """
 
 from __future__ import annotations
 
-from ingence.rulebook.revision_6 import derivations
+from ingence.rulebook.revision_6 import derivations, experiments, workflows
 
 __all__ = ["REVISION"]
 
 #: The modules of the revision, in the order their rules and changes are declared.
-_TRACKS = (derivations,)
+_TRACKS = (workflows, derivations, experiments)
 
 REVISION: dict[str, object] = {
     "revision": 6,
     "summary": (
-        "The rules the invented laboratory's accuracy test asked for: a script's calls read "
-        "step by step. Supersedes what it changes and edits nothing earlier."
+        "The rules the invented laboratory's accuracy test asked for: a folder's stage, an "
+        "instrument's metadata, and a script's calls read step by step. Supersedes what it "
+        "changes and edits nothing earlier."
     ),
     "changes": [change for track in _TRACKS for change in track.CHANGES],
     "rules": [rule for track in _TRACKS for rule in track.RULES],
