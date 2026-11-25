@@ -1,5 +1,5 @@
-"""Revision 6, derivations: which of a script's inputs made which of its outputs, and which files
-of one name are made from one another.
+"""Revision 6, derivations: which of a script's inputs made which of its outputs, and how many of
+the files one file names are paired.
 
 - ``derivation_by_a_scripts_calls`` v2: each file a script writes is made from the files it read in
   the same step of its calls, after its previous write (``pairs_within``). Version 1 paired every
@@ -13,6 +13,10 @@ of one name are made from one another.
   replicates' files were too. On the invented laboratory's two middle collections the identity's
   wrong derivations went from 92 and 62 to none, and its right ones from 709 and 816 to 802 and
   878.
+- ``candidate_generation_is_bounded`` v2: the files one file names itself (``mentioned``,
+  ``co_mentioned``) are bounded at ``maximum_named``, and every other index at
+  ``maximum_candidates`` as before. A script naming seventy files had all but twenty-five of its
+  references cut, and which twenty-five were kept turned on the folder's path.
 """
 
 from __future__ import annotations
@@ -103,6 +107,63 @@ def _within_name_identity() -> dict[str, object]:
 RULES: list[dict[str, object]] = [
     _scripts_calls(),
     _within_name_identity(),
+    {
+        "id": "candidate_generation_is_bounded",
+        "version": "2",
+        "predicate": "candidates_are_bounded_per_subject",
+        "effect": "constraint",
+        "tier": "entailed",
+        "level": "file",
+        "statement": (
+            "The pairs proposed for one subject may not outnumber {maximum_candidates}, or "
+            "{maximum_named} where they are drawn within {named_within} (the files one file names "
+            "in its own text), and a subject whose pairs were cut is recorded as truncated."
+        ),
+        "rationale": (
+            "Pairs come from shared-key lookups, so a key that turns out to be common on some "
+            "corpus yields a bucket of thousands and a comparison of every file in it with every "
+            "other; the cap makes that a truncated answer rather than a run that never finishes, "
+            "and recording the truncation keeps a bounded result distinguishable from a complete "
+            "one. The files a script or a note names in its own text are no shared key: each is "
+            "named, and their number is what the text holds. Version 1 cut them at the same "
+            "bound, so a script naming seventy files kept twenty-five references, chosen by the "
+            "order of their identifiers, which turn on the folder's path."
+        ),
+        "parameters": [
+            {
+                "name": "maximum_candidates",
+                "type": "integer",
+                "default": 25,
+                "minimum": 1,
+                "maximum": 1000,
+                "description": (
+                    "How many pairs one subject may be proposed. A corpus where this fires "
+                    "constantly is a corpus whose indexes need narrowing, which is a finding "
+                    "rather than a number to raise."
+                ),
+            },
+            {
+                "name": "maximum_named",
+                "type": "integer",
+                "default": 500,
+                "minimum": 1,
+                "maximum": 10000,
+                "description": (
+                    "How many pairs one subject may be proposed among the files one file names "
+                    "itself. A script naming more than this many files is cut and says so."
+                ),
+            },
+            {
+                "name": "named_within",
+                "type": "string_list",
+                "default": ["mentioned", "co_mentioned"],
+                "description": (
+                    "The indexes whose pairs are the files one file names: what it names, and "
+                    "two files it names together."
+                ),
+            },
+        ],
+    },
 ]
 
 #: What this module changes in rules an earlier revision declared: nothing. A rule declared again

@@ -354,9 +354,10 @@ def test_a_script_naming_more_files_than_the_bound_still_publishes(tmp_path):
     One macro names enough files beside it that the bound on candidates per subject cuts them. The
     truncation claim about each named file must cite an observation made about that file's own
     entry, not the macro's mention, which is an observation made about another entry. Otherwise the
-    run refuses to publish. The mention stays the pair's.
+    run refuses to publish. The mention stays the pair's. The bound on the files one file names is
+    set as low as the general bound, so thirty files trip it.
     """
-    from fixtures.revision_4 import write_revision
+    from fixtures.revision_4 import tune, write_revision
     from ingence.core.project import Project
     from ingence.core.settings import ExtractionSettings
     from ingence.infer.run import run_inference
@@ -374,6 +375,7 @@ def test_a_script_naming_more_files_than_the_bound_still_publishes(tmp_path):
         (pool / "vorn" / "data" / name).write_text("well,value\nA1,1\n")
     project = Project.create(tmp_path / "project", created_at="t", roots=[pool])
     write_revision(project.path)
+    tune(project.path, "maximum_named", 25, rules=("candidate_generation_is_bounded",))
     project = project.save_settings(
         project.settings.model_copy(update={"extraction": ExtractionSettings(enabled=True)})
     )

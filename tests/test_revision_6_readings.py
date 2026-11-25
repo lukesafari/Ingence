@@ -5,6 +5,7 @@ invented.
   a file stating its own, a folder stating two, and a folder two levels up give nothing.
 - An instrument's metadata, named as the acquisition beside it but for the extension, is raw
   data and not a second acquisition, and a folder of movies and their metadata is no experiment.
+- The files one file names are bounded apart from a shared key's bucket.
 """
 
 from __future__ import annotations
@@ -101,6 +102,25 @@ def test_a_folder_of_movies_and_their_metadata_is_no_experiment(project: Project
     assert contents.get(f"{DAY}/images") != "experiment"
     # Version 3 read each metadata file as named for its movie, and called this folder one.
     assert contents.get(f"{MOVIES}/raw") == "acquisitions"
+
+
+def test_the_files_one_file_names_are_bounded_apart() -> None:
+    from ingence.infer.subjects import CandidateSet
+    from ingence.rulebook import shipped_rulebook
+    from ingence.rulebook.registry import PREDICATES
+    from ingence.rulebook.render import value_in_force
+
+    rule = shipped_rulebook().by_id("candidate_generation_is_bounded")
+    assert rule is not None
+    parameters = {spec.name: value_in_force(spec) for spec in rule.parameters}
+    predicate = PREDICATES.get(rule.predicate)
+    seventy = tuple(object() for _ in range(70))
+    named = CandidateSet(subject=None, counterparts=seventy, within="co_mentioned")  # type: ignore[arg-type]
+    keyed = CandidateSet(subject=None, counterparts=seventy, within="same_name_identity")  # type: ignore[arg-type]
+    assert predicate.evaluate(named, parameters) == 0
+    assert predicate.evaluate(keyed, parameters) == 70 - parameters["maximum_candidates"]
+    # Read as version 1 read it, with one bound everywhere.
+    assert predicate.evaluate(named, {"maximum_candidates": 25}) == 45
 
 
 def test_the_metadata_beside_an_acquisition_is_found_by_name_alone() -> None:

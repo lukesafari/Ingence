@@ -278,14 +278,26 @@ class CandidatesAreBoundedPerSubject:
 
     The rule is evaluable on a subject's candidate set. It says how many counterparts to cut, zero
     where they are within the bound, and never which. The canonical order decides which survive.
+
+    From version 2 a rule may name a second bound, ``maximum_named``, for the indexes in
+    ``named_within``: pairs drawn from the files one file names itself (``mentioned``,
+    ``co_mentioned``). There no shared key fills a bucket. Every counterpart is a file the script or
+    the note names in its own text, so a script naming seventy files has seventy counterparts and
+    no more, and the bound meant for a common key cut most of them. A rule naming neither reads
+    one bound everywhere, as version 1 did.
     """
 
     name = "candidates_are_bounded_per_subject"
-    version = "1"
+    version = "2"
 
     def evaluate(self, subject: object, parameters: Mapping[str, object]) -> object:
         """Return how many of a subject's counterparts exceed the bound."""
         maximum = parameters.get("maximum_candidates")
+        within = getattr(subject, "within", None)
+        if parameters.get("maximum_named") is not None and within in _strings(
+            parameters.get("named_within")
+        ):
+            maximum = parameters.get("maximum_named")
         if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
             message = f"expected a positive integer bound, found {maximum!r}"
             raise TypeError(message)
@@ -474,11 +486,11 @@ def _build_endpoint_is_not_of_an_excluded_class() -> Predicate:
 
 @declare(
     "candidates_are_bounded_per_subject",
-    version="1",
+    version="2",
     summary="Refuse to generate more than a stated number of candidates for one subject",
     effect=RuleEffect.CONSTRAINT,
     reads=Reads.CANDIDATES,
-    parameters=("maximum_candidates",),
+    parameters=("maximum_candidates", "maximum_named", "named_within"),
 )
 def _build_candidates_are_bounded_per_subject() -> Predicate:
     return CandidatesAreBoundedPerSubject()
